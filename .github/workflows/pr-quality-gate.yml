@@ -61,18 +61,42 @@ jobs:
             echo "pubspec=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Secret scan (no hardcoded credentials in lib/)
+      - name: Secret scan (no hardcoded credentials in lib/, test/, or workflows)
         run: |
-          # HF tokens, GitHub PATs, AWS keys, private keys. lib/ is Dart source —
-          # there is never a legit reason for a raw credential to live here.
-          PATTERN='hf_[A-Za-z0-9]{30}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          # HF tokens, GitHub PATs, AWS keys, Google/Gemini API keys, private keys.
+          # Covers lib/ + test/ (Dart source/tests) AND .github/ (CI workflows) —
+          # the 2026-07-04 incident (a full Android signing keystore + its
+          # plaintext password committed directly in build_apk.yml) would NOT have
+          # been caught by a lib/-only scan, since it lived in a workflow file.
+          PATTERN='hf_[A-Za-z0-9]{30}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
           # Lines tagged `gate-allow-token` are intentional, allowlisted bundled
           # credentials (e.g. the gated HF model-download token) — any OTHER match fails.
-          if grep -rEn "$PATTERN" lib/ | grep -v 'gate-allow-token'; then
-            echo "::error::Hardcoded credential detected in lib/. Move it out of source, or tag the line // gate-allow-token if it is an intentional bundled token."
+          if grep -rEn "$PATTERN" lib/ test/ .github/ | grep -v 'gate-allow-token'; then
+            echo "::error::Hardcoded credential detected. Move it to a GitHub Actions secret, or tag the line // gate-allow-token if it is an intentional bundled token."
             exit 1
           fi
-          echo "✅ No unexpected hardcoded credentials in lib/"
+          echo "✅ No unexpected hardcoded credentials in lib/, test/, or .github/"
+
+      - name: Keystore regression guard (no signing material committed)
+        run: |
+          # Regression guard for the exact 2026-07-04 incident: a base64 PKCS12
+          # keystore blob and its plaintext password/alias were hardcoded directly
+          # in build_apk.yml. Both now come from ANDROID_KEYSTORE_BASE64 /
+          # ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS secrets — this fails the
+          # build if either pattern ever reappears in committed source.
+          if git ls-files | grep -qE '\.(jks|keystore|p12|pfx)$'; then
+            echo "::error::A keystore file (*.jks/*.keystore/*.p12/*.pfx) is tracked in git. Signing keys must never be committed — use ANDROID_KEYSTORE_BASE64 instead."
+            exit 1
+          fi
+          if grep -rEn '"MII[A-Za-z0-9+/=]{100,}' .github/ 2>/dev/null; then
+            echo "::error::A base64 blob matching a PKCS12/DER keystore preamble (MII...) is hardcoded in a workflow file. Keystores must only be injected via the ANDROID_KEYSTORE_BASE64 secret."
+            exit 1
+          fi
+          if grep -rEn '(storePassword|keyPassword)=[A-Za-z0-9]' .github/ 2>/dev/null | grep -vE '\$\{\{ secrets\.|\$ANDROID_'; then
+            echo "::error::A literal (non-secret) storePassword/keyPassword value is hardcoded in a workflow file. Use \${{ secrets.ANDROID_KEYSTORE_PASSWORD }} instead."
+            exit 1
+          fi
+          echo "✅ No signing material committed"
 
       - name: App identity guard (applicationId + namespace pinned)
         run: |

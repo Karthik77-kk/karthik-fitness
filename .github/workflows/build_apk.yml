@@ -5,6 +5,18 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Serialize releases. Two builds racing (e.g. a manual re-run overlapping a
+# real merge) can compute the same version tag — versionCode is derived from
+# commit count, so two runs checking out around the same time can land on an
+# identical number. cancel-in-progress: false queues instead of racing; if
+# several merges land faster than the ~10min build, GitHub keeps only the
+# most recently queued run and drops earlier pending ones (not the running
+# one) — no commits are lost, they just ship together in the next release
+# that actually runs, rather than each merge getting its own APK.
+concurrency:
+  group: build-and-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,6 +44,79 @@ jobs:
           echo "label=${TAG}"  >> $GITHUB_OUTPUT
           echo "Release will be ${TAG} (versionCode ${CODE})"
 
+      - name: Pre-flight checks (fail fast, before the ~10min build)
+        # Catches exactly the two failure modes hit on 2026-07-04: a corrupted/
+        # empty signing secret (discovered ~13min into a build as a cryptic
+        # Gradle "keystore password was incorrect") and a revoked RELEASE_PAT
+        # (discovered only at the final release-publish step, after the whole
+        # APK was already built). Both now fail in seconds, with a clear cause.
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FDC_API_KEY: ${{ secrets.FDC_API_KEY }}
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN }}
+          GH_BACKUP_REPO: ${{ secrets.GH_BACKUP_REPO }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          fail=0
+          # kfit-app is a single known deployment, not a general template — every
+          # one of these is expected to always be set. An empty value here means
+          # a secret got lost/miscopied (e.g. during a future repo/secret
+          # migration like 2026-07-04's), not a legitimate "feature disabled"
+          # state, so it fails the build rather than silently shipping a build
+          # with a dead feature (e.g. cloud backup or AI meal scan quietly broken
+          # for every user with no CI signal at all).
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS \
+                      HF_TOKEN FDC_API_KEY GH_BACKUP_TOKEN GH_BACKUP_REPO GEMINI_API_KEY; do
+            val="${!name}"
+            if [ -z "$val" ]; then
+              echo "::error::Secret $name is empty. Check it's still set on this repo (Settings → Secrets and variables → Actions)."
+              fail=1
+            fi
+          done
+          # A valid PKCS12 keystore's base64 form starts with "MII" (DER SEQUENCE
+          # tag). A short/garbled value here means the secret got corrupted.
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ "${#ANDROID_KEYSTORE_BASE64}" -lt 100 ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 looks too short (${#ANDROID_KEYSTORE_BASE64} chars) to be a real keystore. It may be corrupted."
+            fail=1
+          fi
+          # Sanity bound, not an emptiness check: the actual 2026-07-04 incident
+          # was a botched text-extraction that left the password/alias secrets
+          # holding ~80+ chars of leaked config lines, not an empty value — an
+          # emptiness-only check would have missed it. Real passwords/aliases
+          # are never this long, so this catches the same failure class without
+          # hardcoding the real (short) expected values into a CI script.
+          if [ "${#ANDROID_KEYSTORE_PASSWORD}" -gt 200 ]; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD is implausibly long (${#ANDROID_KEYSTORE_PASSWORD} chars) — likely corrupted with leaked extra text."
+            fail=1
+          fi
+          if [ "${#ANDROID_KEY_ALIAS}" -gt 200 ]; then
+            echo "::error::ANDROID_KEY_ALIAS is implausibly long (${#ANDROID_KEY_ALIAS} chars) — likely corrupted with leaked extra text."
+            fail=1
+          fi
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::RELEASE_PAT is empty. Cross-repo release publishing to kfit will fail."
+            fail=1
+          elif ! gh api repos/Karthik77-kk/kfit --jq .name >/dev/null 2>&1; then
+            echo "::error::RELEASE_PAT can't read Karthik77-kk/kfit (revoked, expired, or missing permission). Generate a replacement fine-grained PAT (Contents + Pull requests: read/write on both kfit and kfit-app) and update the RELEASE_PAT secret before this can release."
+            fail=1
+          fi
+          # Catch a version-tag race early rather than failing at the final
+          # release-creation step after the full build already ran. Only check
+          # if the token itself is valid — an already-failed auth check above
+          # would make this call fail for the wrong reason and double-report.
+          if [ -n "$GITHUB_TOKEN" ] && gh api "repos/Karthik77-kk/kfit/releases/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Release ${{ steps.ver.outputs.tag }} already exists on kfit — another build already published it (likely a concurrent/duplicate trigger). Nothing to do here."
+            fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            echo "✅ Pre-flight checks passed"
+          fi
+          exit "$fail"
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -44,6 +129,23 @@ jobs:
           flutter-version: "3.44.0"
           channel: stable
           cache: true
+
+      - name: Cache Gradle & native dependencies
+        # Gradle's own dependency cache and flutter_gemma's downloaded native
+        # libs (~90 MB of MediaPipe/litertlm binaries) aren't covered by the
+        # flutter-action cache above, so every build on a fresh runner
+        # re-downloads them from scratch. The Gradle config that determines the
+        # dependency set is generated inline from build_apk.yml (not a
+        # committed android/ file), so that's what the key is derived from.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cache/flutter_gemma
+          key: gradle-${{ runner.os }}-${{ hashFiles('.github/workflows/build_apk.yml', 'pubspec.lock') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: Generate Android scaffold (preserving committed android/)
         run: |
