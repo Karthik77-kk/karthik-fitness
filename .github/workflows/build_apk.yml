@@ -401,8 +401,9 @@ jobs:
         run: |
           set -e
           # Previous release tag (this run's release doesn't exist yet, so
-          # `gh release view` returns the most recent prior release).
-          PREV=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          # `gh release view` returns the most recent prior release). Releases
+          # are published to the public kfit repo, not this (private) source repo.
+          PREV=$(gh release view --repo Karthik77-kk/kfit --json tagName -q .tagName 2>/dev/null || true)
           echo "Previous release: ${PREV:-<none>}"
           if [ -n "$PREV" ] && git merge-base --is-ancestor "$PREV" HEAD 2>/dev/null; then
             RANGE="${PREV}..HEAD"
@@ -436,14 +437,18 @@ jobs:
           echo "----- release_notes.md -----"
           cat release_notes.md
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
 
       - name: Create GitHub Release with APK
+        # Publishes to the public kfit repo (distribution-only), not this
+        # private source repo — the website and in-app updater both point at
+        # Karthik77-kk/kfit, so this is what keeps them working unchanged.
         run: |
           gh release create "${{ steps.ver.outputs.tag }}" \
             build/app/outputs/flutter-apk/kfit.apk \
+            --repo Karthik77-kk/kfit \
             --title "${{ steps.ver.outputs.label }}" \
             --notes-file release_notes.md \
             --latest
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
