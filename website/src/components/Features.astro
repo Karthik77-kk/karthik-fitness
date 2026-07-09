@@ -140,7 +140,7 @@ const icons: Record<string, string> = {
       const rect = card.getBoundingClientRect();
       const px = (e.clientX - rect.left) / rect.width;
       const py = (e.clientY - rect.top)  / rect.height;
-      // Cursor-following spotlight (Linear/Claude-style) — cheap CSS var update.
+      // Cursor-following spotlight — cheap CSS var update.
       card.style.setProperty('--mx', `${px * 100}%`);
       card.style.setProperty('--my', `${py * 100}%`);
       const x = (px - 0.5) * 2;

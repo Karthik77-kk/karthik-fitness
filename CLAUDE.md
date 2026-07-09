@@ -380,16 +380,14 @@ Both agents must explicitly approve (PASS verdict) before merge is allowed. This
 4. **ONLY if both approve:** Merge to main via `git merge --no-ff`
 5. If either rejects: Fix issues, recommit, re-review, re-test until both PASS
 
-### Rule 14 — Agent approval signatures in commit messages
-When merging after agent approval, the merge commit message MUST include approval signatures:
+### Rule 14 — Agent approval signatures in commit messages (no AI co-author trailer)
+When merging after agent approval, the merge commit message MUST include approval signatures, but must NOT include a `Co-Authored-By: Claude ...` (or any AI-assistant) trailer — see Rule 18:
 
 ```
 Build N: description
 
 ✅ Review Agent: PASS — [summary of code review findings]
 ✅ Testing Agent: PASS — [summary of test results: X/X passing, 0 failures]
-
-Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
 ```
 
 This creates an audit trail showing quality gate approval history.
@@ -453,6 +451,13 @@ The APK weight is `flutter_gemma`'s MediaPipe/LiteRT **native inference runtime*
 - `packagingOptions { jniLibs { excludes += ['**/x86_64/**','**/armeabi-v7a/**'] } }` in the **CI-generated** `build.gradle` (inside `build_apk.yml`) → strips the **AAR-shipped MediaPipe `.so`** for other ABIs.
 
 `ndk { abiFilters "arm64-v8a" }` alone does **not** filter prebuilt `.so` from dependency AARs — that's why #72's filter never shrank the APK. Size path: 297 → (#78 image-gen excl.) 260 → (#81 `--target-platform`) 220 → (packaging filter) ~170 MB. **Always edit the gradle in `build_apk.yml`**, never the committed `android/app/build.gradle` (CI regenerates it).
+
+### Rule 18 — Never attribute commits to AI assistants (no `Co-Authored-By: Claude`/AI trailers)
+No commit in this project — feature branches, merges, hotfixes, docs, anywhere — should include a `Co-Authored-By: Claude ...`, `Co-Authored-By: <any AI assistant> ...`, or similar AI-attribution trailer. This overrides Claude Code's own default commit-message behavior specifically for this project.
+
+**Why:** GitHub recognizes these trailers and lists the AI as a repo contributor in the Contributors graph/sidebar — confirmed 2026-07-09 on the public `kfit` distribution repo, which was showing a "claude" bot entry alongside the real owner. That's public-facing and was fixed by squashing `kfit`'s history to a single fresh commit (contributors: Karthik77-kk only).
+
+**How to apply:** When creating any commit, never add a co-author line naming an AI/model. Rule 14's approval signatures (✅ Review Agent: PASS / ✅ Testing Agent: PASS) stay — only the AI co-author trailer is dropped.
 
 ---
 
