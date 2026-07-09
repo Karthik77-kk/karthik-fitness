@@ -39,18 +39,37 @@ jobs:
           github-token: ${{ secrets.RELEASE_PAT || github.token }}
           script: |
             const prId = context.payload.pull_request.node_id;
-            try {
-              await github.graphql(
-                `mutation($id: ID!) {
-                   enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) {
-                     pullRequest { number }
-                   }
-                 }`,
-                { id: prId }
-              );
-              core.info('✅ Native auto-merge enabled (squash). PR will merge when required checks pass.');
-            } catch (e) {
-              // Common, non-fatal reasons: "Allow auto-merge" not enabled in repo
-              // settings, PR already mergeable/merged, or no required checks configured.
-              core.info('ℹ️ Could not enable auto-merge: ' + e.message);
+            const mutation = `mutation($id: ID!) {
+              enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) {
+                pullRequest { number }
+              }
+            }`;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+            // "Pull request is in unstable status" is a brief, self-clearing
+            // race: this workflow and pr-quality-gate.yml both fire off the
+            // same pull_request event, and GitHub can reject the mutation if
+            // it lands mid-recompute of the other check's status. Retrying a
+            // few times a few seconds apart reliably clears it — confirmed
+            // 2026-07-09 on PR #3, which needed a manual re-run because this
+            // wasn't retried and the job just logged and gave up.
+            const attempts = 5;
+            for (let i = 1; i <= attempts; i++) {
+              try {
+                await github.graphql(mutation, { id: prId });
+                core.info('✅ Native auto-merge enabled (squash). PR will merge when required checks pass.');
+                return;
+              } catch (e) {
+                const transient = /unstable status/i.test(e.message);
+                if (transient && i < attempts) {
+                  core.info(`ℹ️ PR not stable yet (attempt ${i}/${attempts}), retrying in 10s: ${e.message}`);
+                  await sleep(10000);
+                  continue;
+                }
+                // Other non-fatal reasons: "Allow auto-merge" not enabled in
+                // repo settings, PR already mergeable/merged, or no required
+                // checks configured.
+                core.info('ℹ️ Could not enable auto-merge: ' + e.message);
+                return;
+              }
             }
