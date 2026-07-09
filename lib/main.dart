@@ -121,6 +121,7 @@ class KfitApp extends StatelessWidget {
       home: Consumer<FitnessProvider>(
         builder: (context, p, _) {
           if (!p.isLoaded) return const _SplashScreen();
+          if (p.isTampered) return const _TamperedBlockScreen();
           if (!p.onboardingDone) return const OnboardingScreen();
           return const MainNavigationScreen();
         },
@@ -140,6 +141,54 @@ class _SplashScreen extends StatelessWidget {
   const _SplashScreen();
   @override
   Widget build(BuildContext context) => const BrandSplash();
+}
+
+/// Terminal screen shown instead of the app when this build's signing
+/// certificate doesn't match the official release (see
+/// FitnessProvider.isTampered / IntegrityCheckService). Deliberately has no
+/// way to continue past it — this can only ever trigger on a real CI-signed
+/// release build whose certificate has since changed, i.e. a modified,
+/// re-signed copy.
+class _TamperedBlockScreen extends StatelessWidget {
+  const _TamperedBlockScreen();
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.gpp_bad_outlined,
+                    color: Color(0xFFFF453A), size: 56),
+                SizedBox(height: 20),
+                Text(
+                  "This app can't be verified",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700),
+                ),
+                SizedBox(height: 12),
+                Text(
+                  "This install doesn't match the official release build, "
+                  "so it won't run. If you didn't modify it yourself, "
+                  're-download it from the official source.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Color(0xFF8E8E93), fontSize: 14, height: 1.4),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _MainNavigationScreenState extends State<MainNavigationScreen>

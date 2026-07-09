@@ -459,6 +459,16 @@ No commit in this project — feature branches, merges, hotfixes, docs, anywhere
 
 **How to apply:** When creating any commit, never add a co-author line naming an AI/model. Rule 14's approval signatures (✅ Review Agent: PASS / ✅ Testing Agent: PASS) stay — only the AI co-author trailer is dropped.
 
+### Rule 19 — PR titles become user-facing changelog text: keep them short, generic, and detail-free
+Every PR is squash-merged, so the squash commit's subject line **is** the PR title. `build_apk.yml`'s "Compose dynamic release notes" step extracts commit **subjects only** (`git log --pretty=format:'%s'`) straight into the GitHub release body — which the in-app updater then shows to the end user as "What's new." **The PR title is a changelog bullet, not an internal label.**
+
+**Why:** 2026-07-09 — two internal/CI-focused PR titles ("Docs: drop AI co-author trailer requirement", "CI: weekly release cleanup on kfit") were about to ship verbatim as update-dialog text. For security-hardening work specifically, this is worse than unpolished — describing the exact mechanism being added (signing checks, tamper detection, etc.) in text a modified/redistributed copy's user could also read is counterproductive.
+
+**How to apply:**
+- Write PR titles like a real app changelog entry: short, plain-language, generic — e.g. "Reliability and stability improvements," "Bug fixes," "Under-the-hood improvements."
+- Never put internal jargon in the title: no CI/workflow/keystore/tamper/signing/secrets/agent/gate/PR/repo terminology, no security-mechanism specifics, no build/rule numbers.
+- All real technical detail — the actual why/what/how — goes in the **PR description and commit body** instead. Only the subject line (`%s`) is ever extracted into release notes; the body never is.
+
 ---
 
 ## Build & Run Commands

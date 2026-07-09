@@ -15,6 +15,7 @@ import '../services/notification_center.dart';
 import '../services/chat_session_service.dart';
 import '../services/food_repository.dart' show normalizeFood, FoodRepository;
 import '../services/gemini_text_service.dart';
+import '../services/integrity_check_service.dart';
 
 /// Where the AI coach runs: on-device Gemma (offline, private, ~600 MB download)
 /// or a cheap/fast cloud model (Gemini Flash-Lite — needs internet + the built-in
@@ -221,6 +222,22 @@ class FitnessProvider extends ChangeNotifier {
 
   bool _autoUpdateCheck = true;
   bool get autoUpdateCheck => _autoUpdateCheck;
+
+  /// True if this APK's signing certificate doesn't match the official
+  /// release build — see [IntegrityCheckService]. Resolved as part of
+  /// [loadData]'s critical path (before [_isLoaded] flips true) so the app
+  /// never shows a real screen before this is known — always false on
+  /// local/debug builds, where the check is a no-op.
+  bool _isTampered = false;
+  bool get isTampered => _isTampered;
+
+  /// Test-only seam for exercising the tampered-block gate in main.dart
+  /// without needing a --dart-define at test-run time.
+  @visibleForTesting
+  void debugSetTampered(bool value) {
+    _isTampered = value;
+    notifyListeners();
+  }
 
   /// Epoch ms until which the user has snoozed update prompts (via "Later").
   int _updateSnoozedUntilMs = 0;
@@ -1899,8 +1916,20 @@ class FitnessProvider extends ChangeNotifier {
       }
     }
 
+    // Resolved before _isLoaded flips true — main.dart's startup gate checks
+    // isTampered on the same frame isLoaded first becomes true, so a
+    // tampered build never gets a chance to show a real screen.
+    _isTampered = await IntegrityCheckService.isTampered();
     _isLoaded = true;
     _loadedForDate = _todayKey;
+
+    if (_isTampered) {
+      // Nothing past this point (pedometer, notifications, network calls,
+      // widget updates) should run on a build that shouldn't be running at
+      // all — main.dart shows the block screen and nothing else happens.
+      notifyListeners();
+      return;
+    }
 
     // NOTE: daily food/water/supp keys are intentionally NEVER purged — the user
     // keeps their full history forever. (Chat sessions are still capped below.)

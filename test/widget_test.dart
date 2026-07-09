@@ -122,6 +122,44 @@ void main() {
     await _disposeTree(tester);
   });
 
+  // ── Tampered-build gate ───────────────────────────────────────────────────
+
+  testWidgets(
+      'Shows block screen instead of onboarding/main nav when tampered',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({'onboarding_done': true});
+    final provider = FitnessProvider();
+    await provider.loadData();
+    provider.debugSetTampered(true);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider.value(value: provider),
+          ChangeNotifierProvider(create: (_) => NavRouter()),
+        ],
+        child: const KfitApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text("This app can't be verified"), findsOneWidget);
+    expect(find.byType(MainNavigationScreen), findsNothing);
+    expect(find.byType(OnboardingScreen), findsNothing);
+    await _disposeTree(tester);
+    provider.dispose(); // owned via .value() — cancels its day-reset timer
+  });
+
+  testWidgets('No block screen when signing check has not flagged tampering',
+      (tester) async {
+    await tester.pumpWidget(_appWithProvider(onboardingDone: true));
+    await tester.pumpAndSettle();
+
+    expect(find.text("This app can't be verified"), findsNothing);
+    expect(find.byType(MainNavigationScreen), findsOneWidget);
+    await _disposeTree(tester);
+  });
+
   testWidgets('Onboarding page 1 has name text field', (tester) async {
     await tester.pumpWidget(_appWithProvider(onboardingDone: false));
     await tester.pumpAndSettle();

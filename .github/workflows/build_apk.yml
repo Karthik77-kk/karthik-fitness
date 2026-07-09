@@ -181,6 +181,7 @@ jobs:
         # file — it used to hold the base64 keystore and its plaintext password
         # directly in committed source, which any repo viewer could read). Same
         # signing key as always, so existing installs keep updating in place.
+        id: sign
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -188,6 +189,19 @@ jobs:
         run: |
           # Decode persistent keystore (same key every build = APK updates in place)
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/kfitness.jks
+
+          # Certificate fingerprint (SHA-256 of the DER-encoded cert, not the private
+          # key) baked into the app so it can recognize its own official build at
+          # runtime. This is public identifying info, not a secret — the same value
+          # apps routinely hand to Firebase/Play Console/Maps API key restrictions.
+          SHA256=$(keytool -list -v -keystore android/app/kfitness.jks \
+              -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null \
+            | grep "SHA256:" | head -1 | sed 's/.*SHA256: *//' | tr -d ':' | tr 'A-F' 'a-f')
+          if [ -z "$SHA256" ]; then
+            echo "::error::Could not read the signing certificate's SHA-256 fingerprint from the keystore."
+            exit 1
+          fi
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
           # Create key.properties
           printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=kfitness.jks\n' \
@@ -324,6 +338,7 @@ jobs:
                   pkg_line,
                   '',
                   'import android.content.Intent',
+                  'import android.content.pm.PackageManager',
                   'import android.net.Uri',
                   'import android.os.Build',
                   'import android.os.PowerManager',
@@ -331,9 +346,12 @@ jobs:
                   'import io.flutter.embedding.android.FlutterActivity',
                   'import io.flutter.embedding.engine.FlutterEngine',
                   'import io.flutter.plugin.common.MethodChannel',
+                  'import java.security.MessageDigest',
                   '',
+                  '@Suppress("DEPRECATION")',
                   'class MainActivity: FlutterActivity() {',
                   '    private val CHANNEL = "com.kfitness/battery"',
+                  '    private val INTEGRITY_CHANNEL = "com.kfitness/integrity"',
                   '',
                   '    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {',
                   '        super.configureFlutterEngine(flutterEngine)',
@@ -374,6 +392,38 @@ jobs:
                   '                            startActivity(intent)',
                   '                        }',
                   '                        result.success(true)',
+                  '                    }',
+                  '                    else -> result.notImplemented()',
+                  '                }',
+                  '            }',
+                  '',
+                  '        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, INTEGRITY_CHANNEL)',
+                  '            .setMethodCallHandler { call, result ->',
+                  '                when (call.method) {',
+                  '                    "getSigningSha256" -> {',
+                  '                        try {',
+                  '                            val sig = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {',
+                  '                                val info = packageManager.getPackageInfo(',
+                  '                                    packageName, PackageManager.GET_SIGNING_CERTIFICATES)',
+                  '                                info.signingInfo?.apkContentsSigners?.firstOrNull()',
+                  '                            } else {',
+                  '                                val info = packageManager.getPackageInfo(',
+                  '                                    packageName, PackageManager.GET_SIGNATURES)',
+                  '                                info.signatures?.firstOrNull()',
+                  '                            }',
+                  '                            if (sig != null) {',
+                  '                                val digest = MessageDigest.getInstance("SHA-256")',
+                  '                                    .digest(sig.toByteArray())',
+                  '                                val hex = digest.joinToString("") {',
+                  '                                    "%02x".format(it.toInt() and 0xFF)',
+                  '                                }',
+                  '                                result.success(hex)',
+                  '                            } else {',
+                  '                                result.success("")',
+                  '                            }',
+                  '                        } catch (e: Exception) {',
+                  '                            result.success("")',
+                  '                        }',
                   '                    }',
                   '                    else -> result.notImplemented()',
                   '                }',
@@ -465,7 +515,8 @@ jobs:
             --dart-define=FDC_API_KEY_B64=$(b64 "${{ secrets.FDC_API_KEY }}") \
             --dart-define=GH_BACKUP_TOKEN_B64=$(b64 "${{ secrets.GH_BACKUP_TOKEN }}") \
             --dart-define=GH_BACKUP_REPO_B64=$(b64 "${{ secrets.GH_BACKUP_REPO }}") \
-            --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}")
+            --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}") \
+            --dart-define=EXPECTED_SIGNING_SHA256=${{ steps.sign.outputs.sha256 }}
 
       - name: Upload debug symbols
         uses: actions/upload-artifact@v4
