@@ -13,6 +13,7 @@ import '../widgets/date_picker_chip.dart';
 import '../widgets/kit/kit.dart';
 import '../theme/app_tokens.dart';
 import 'barcode_scanner_screen.dart';
+import 'copy_yesterday_sheet.dart';
 import '../services/haptics.dart';
 import '../services/meal_scan.dart';
 import '../services/gemini_vision_service.dart';
@@ -135,34 +136,6 @@ class FoodScreen extends StatelessWidget {
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
 
-  Future<void> _copyYesterday(BuildContext context) async {
-    final p = context.read<FitnessProvider>();
-    final yesterday = DateTime.now().subtract(const Duration(days: 1));
-    final key =
-        '${yesterday.year}-${yesterday.month.toString().padLeft(2, '0')}-${yesterday.day.toString().padLeft(2, '0')}';
-    final yEntries = p.foodHistory[key] ?? [];
-    if (yEntries.isEmpty) {
-      _foodSnack(ScaffoldMessenger.of(context), 'No food logged yesterday to copy',
-          color: const Color(0xFFFF9F0A), duration: const Duration(seconds: 2));
-      return;
-    }
-    for (final e in yEntries) {
-      await p.addFoodEntry(FoodEntry(
-        id: p
-            .newId(), // UUID — millisecond ids collide in a loop -> duplicate Dismissible keys crash
-        name: e.name, calories: e.calories, protein: e.protein,
-        carbs: e.carbs, fat: e.fat, macrosKnown: e.macrosKnown,
-        mealType: e.mealType, servingNote: e.servingNote,
-        timestamp: DateTime.now(),
-      ));
-    }
-    if (context.mounted) {
-      _foodSnack(ScaffoldMessenger.of(context),
-          'Copied ${yEntries.length} items from yesterday',
-          duration: const Duration(seconds: 2));
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final p = context.watch<FitnessProvider>();
@@ -175,9 +148,14 @@ class _EmptyState extends StatelessWidget {
       icon: '🍽️',
       title: 'No food logged today',
       subtitle: 'Tap + Add Food to start logging',
+      // Opens a glass review sheet so the user can edit/remove yesterday's items
+      // before adding them to today, instead of copying everything blindly.
       action: hasYesterday
           ? OutlinedButton.icon(
-              onPressed: () => _copyYesterday(context),
+              onPressed: () {
+                Haptics.tap();
+                showCopyYesterdaySheet(context);
+              },
               icon: const Icon(Icons.copy_rounded, size: 16),
               label: const Text('Copy yesterday\'s meals'),
               style: OutlinedButton.styleFrom(
