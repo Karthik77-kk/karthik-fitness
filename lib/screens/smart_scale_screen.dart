@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
+import '../services/haptics.dart';
 import '../widgets/input_formatters.dart';
 import '../providers/fitness_provider.dart';
 import '../models/models.dart';
@@ -174,7 +174,7 @@ class _LogTabState extends State<_LogTab> with AutomaticKeepAliveClientMixin {
       skeletalMuscleMassKg: double.tryParse(_skeletalMuscle.text) ?? 0,
     );
     await context.read<FitnessProvider>().logScaleEntry(entry);
-    HapticFeedback.heavyImpact();
+    Haptics.heavy();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/fitness_provider.dart';
+import '../services/haptics.dart';
 import '../theme/app_tokens.dart';
 import '../widgets/date_picker_chip.dart';
 import '../widgets/kit/kit.dart';
@@ -39,12 +39,12 @@ class _WaterScreenState extends State<WaterScreen>
   }
 
   void _removeWater(BuildContext context, int ml) {
-    HapticFeedback.selectionClick();
+    Haptics.selection();
     context.read<FitnessProvider>().removeWater(ml);
   }
 
   void _addWater(BuildContext context, int ml) async {
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     _animController.forward().then((_) => _animController.reverse());
     await context.read<FitnessProvider>().addWater(ml, date: _logDate);
     if (!mounted) return;

@@ -2,6 +2,21 @@ enum MealType { breakfast, lunch, dinner, snack }
 
 enum WorkoutType { a, b, custom }
 
+/// The user's overall body-weight objective. Drives the calorie recommendation
+/// (deficit / maintenance / surplus) and flips the coaching copy in the insight
+/// engine + notifications, which historically assumed fat loss everywhere.
+enum GoalDirection { lose, maintain, gain }
+
+/// Parse a persisted [GoalDirection] name back to the enum, tolerating unknown /
+/// missing values by falling back to [fallback].
+GoalDirection goalDirectionFromName(String? name,
+    {GoalDirection fallback = GoalDirection.lose}) {
+  for (final d in GoalDirection.values) {
+    if (d.name == name) return d;
+  }
+  return fallback;
+}
+
 /// Preset exercises for Workout A (Push) and Workout B (Pull + Legs).
 /// WorkoutType.custom is NOT included — it uses a user-selected list.
 const Map<WorkoutType, List<String>> kWorkoutExercises = {

@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import '../../services/haptics.dart';
 import '../../theme/app_tokens.dart';
 
 /// A ripple wrapper for the many small tap targets (chips, +/− buttons, presets)
@@ -50,7 +50,7 @@ class _AppTappableState extends State<AppTappable> {
     final tap = widget.onTap == null
         ? null
         : () {
-            if (widget.haptic) HapticFeedback.selectionClick();
+            if (widget.haptic) Haptics.selection();
             widget.onTap!();
           };
     final content = widget.padding == null

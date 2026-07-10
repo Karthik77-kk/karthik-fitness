@@ -7,33 +7,23 @@ void main() {
   group('ScanQuota — per-user daily rate limit', () {
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
-    test('a regular user is capped at dailyLimit scans/day', () async {
+    test('every user is capped at dailyLimit scans/day — no exemptions', () async {
       final p = await SharedPreferences.getInstance();
       for (var i = 0; i < ScanQuota.dailyLimit; i++) {
-        expect(ScanQuota.canScan(p, 'Alex'), isTrue,
+        expect(ScanQuota.canScan(p), isTrue,
             reason: 'scan ${i + 1} should be allowed');
-        await ScanQuota.record(p, 'Alex');
+        await ScanQuota.record(p);
       }
-      expect(ScanQuota.canScan(p, 'Alex'), isFalse); // 11th blocked
-      expect(ScanQuota.remaining(p, 'Alex'), 0);
+      expect(ScanQuota.canScan(p), isFalse); // 11th blocked
+      expect(ScanQuota.remaining(p), 0);
       expect(ScanQuota.usedToday(p), ScanQuota.dailyLimit);
-    });
-
-    test('Karthik (owner) is unlimited and never burns credits', () async {
-      final p = await SharedPreferences.getInstance();
-      for (var i = 0; i < 50; i++) {
-        expect(ScanQuota.canScan(p, 'karthik'), isTrue);
-        await ScanQuota.record(p, 'Karthik'); // case/space-insensitive
-      }
-      expect(ScanQuota.canScan(p, ' Karthik '), isTrue);
-      expect(ScanQuota.usedToday(p), 0);
     });
 
     test('remaining counts down with each recorded scan', () async {
       final p = await SharedPreferences.getInstance();
-      await ScanQuota.record(p, 'Sam');
-      await ScanQuota.record(p, 'Sam');
-      expect(ScanQuota.remaining(p, 'Sam'), ScanQuota.dailyLimit - 2);
+      await ScanQuota.record(p);
+      await ScanQuota.record(p);
+      expect(ScanQuota.remaining(p), ScanQuota.dailyLimit - 2);
     });
   });
 

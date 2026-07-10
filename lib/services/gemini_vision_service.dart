@@ -45,6 +45,28 @@ class ScannedFood {
       );
 }
 
+/// Proportionally rescales a [ScannedFood]'s macros to [newGrams], from its
+/// original portion. Used by the meal-scan review screen so editing the grams
+/// field re-derives kcal/P/C/F at the new weight (doubling grams doubles macros).
+///
+/// Guards: when the original portion is unknown (`grams <= 0`) there's no
+/// per-gram rate to scale from, so the macros are kept as-is (only the grams
+/// label updates). A non-positive [newGrams] leaves the food unchanged.
+ScannedFood rescaleScannedFood(ScannedFood f, double newGrams) {
+  if (newGrams <= 0) return f;
+  if (f.grams <= 0) return f.copyWith(grams: newGrams);
+  final ratio = newGrams / f.grams;
+  return ScannedFood(
+    name: f.name,
+    grams: newGrams,
+    kcal: f.kcal * ratio,
+    protein: f.protein * ratio,
+    carbs: f.carbs * ratio,
+    fat: f.fat * ratio,
+    confidence: f.confidence,
+  );
+}
+
 /// Thrown for user-facing failures (network, quota, config). [message] is safe
 /// to show directly in a SnackBar/dialog.
 class GeminiException implements Exception {

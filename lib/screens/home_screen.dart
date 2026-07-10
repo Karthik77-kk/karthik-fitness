@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -10,6 +9,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:confetti/confetti.dart';
 import '../providers/fitness_provider.dart';
 import '../models/models.dart';
+import '../services/haptics.dart';
 import '../theme/app_tokens.dart';
 import '../widgets/kit/kit.dart';
 import 'settings_screen.dart';
@@ -82,7 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         context.read<FitnessProvider>().consumeCelebration();
-        HapticFeedback.heavyImpact(); // milestone lands — make it felt
+        Haptics.heavy(); // milestone lands — make it felt
         _confetti.play();
       });
     } else if (p.hasPendingCelebration) {

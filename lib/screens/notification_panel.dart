@@ -118,15 +118,27 @@ class NotificationsScreen extends StatelessWidget {
       ));
     }
 
-    // Workout reminder: after 4 PM if no workout today and 2+ days since last
-    if (hour >= 16 && p.daysSinceLastWorkout >= 2) {
-      reminders.add(_ReminderItem(
-        emoji: '🏋️',
-        color: _kOrange,
-        title: '${p.daysSinceLastWorkout} days since last workout',
-        body: 'Even 20 min of push-ups, squats and planks counts. '
-            'Log a session tonight to keep your streak alive.',
-      ));
+    // Workout reminder: after 4 PM. For a user who has trained before, nudge
+    // when it's been 2+ days; for one who never has, invite a first session
+    // (never render "999 days since your last workout").
+    if (hour >= 16) {
+      if (!p.hasEverLoggedWorkout) {
+        reminders.add(_ReminderItem(
+          emoji: '🏋️',
+          color: _kOrange,
+          title: 'Log your first workout',
+          body: 'Start your streak tonight — even 20 min of push-ups, squats '
+              'and planks counts.',
+        ));
+      } else if (p.daysSinceLastWorkout >= 2) {
+        reminders.add(_ReminderItem(
+          emoji: '🏋️',
+          color: _kOrange,
+          title: '${p.daysSinceLastWorkout} days since last workout',
+          body: 'Even 20 min of push-ups, squats and planks counts. '
+              'Log a session tonight to keep your streak alive.',
+        ));
+      }
     }
 
     // Walk reminder: after noon if under 50% steps
@@ -254,13 +266,13 @@ class _MorningBriefSection extends StatelessWidget {
     }
     if (wkWorkouts == 0) {
       return 'No workouts logged this week yet. Even one session today makes a difference '
-          'for muscle retention while you\'re in a deficit.';
+          'for muscle retention and strength.';
     }
     if (calAdh > 0 && calAdh < 0.5) {
       return 'Today\'s focus: calories. You\'re hitting your ${p.calorieGoal} kcal target about '
           '${(calAdh * 100).round()}% of days. Log meals early so the AI can guide you.';
     }
-    if (p.deficitStreak >= 3) {
+    if (p.wantsDeficit && p.deficitStreak >= 3) {
       return '${p.deficitStreak}-day deficit streak — great momentum. Stay consistent and protect that protein.';
     }
     return 'Hit ${p.calorieGoal} kcal, ${p.proteinGoal}g protein and ${(p.waterGoalMl / 1000).toStringAsFixed(1)} L water. '
@@ -387,12 +399,21 @@ class _NightCheckSection extends StatelessWidget {
       return 'Tomorrow: start with a high-protein breakfast — 3 eggs or a whey shake '
           'gets you to 25–30g before 10 AM.';
     }
-    if (calPct > 1.2) {
-      return 'Tomorrow: skip the evening snack. Plan dinner by 8 PM and close the kitchen.';
+    // Calorie framing flips with the goal: for a gain goal, finishing under the
+    // target is the problem; for lose/maintain, finishing well over is.
+    if (p.wantsSurplus) {
+      if (calPct < 0.9) {
+        return 'Tomorrow: add a calorie-dense snack — you came in under your goal, '
+            'and a steady surplus is what builds size.';
+      }
+    } else if (calPct > 1.2) {
+      return p.wantsDeficit
+          ? 'Tomorrow: skip the evening snack. Plan dinner by 8 PM and close the kitchen.'
+          : 'Tomorrow: ease back at dinner to land near your maintenance goal.';
     }
-    if (p.daysSinceLastWorkout >= 2) {
-      return 'Tomorrow: log a workout session, even a short one. '
-          'Consistent training keeps your metabolism up in a deficit.';
+    if (p.hasEverLoggedWorkout && p.daysSinceLastWorkout >= 2) {
+      return 'Tomorrow: log a workout session, even a short one. Consistent training '
+          '${p.wantsSurplus ? 'drives the muscle growth you\'re after.' : 'keeps your metabolism up and protects muscle.'}';
     }
     return 'Tomorrow: stay consistent. Log meals early so the coach can guide you '
         'before you go off track.';

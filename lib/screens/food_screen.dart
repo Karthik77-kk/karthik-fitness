@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:skeletonizer/skeletonizer.dart';
@@ -14,6 +13,7 @@ import '../widgets/date_picker_chip.dart';
 import '../widgets/kit/kit.dart';
 import '../theme/app_tokens.dart';
 import 'barcode_scanner_screen.dart';
+import '../services/haptics.dart';
 import '../services/meal_scan.dart';
 import '../services/gemini_vision_service.dart';
 
@@ -880,7 +880,7 @@ class _AddFoodSheetState extends State<_AddFoodSheet> {
   }
 
   void _addApiItem(BuildContext ctx, FoodApiResult item, double grams) {
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     final provider = ctx.read<FitnessProvider>();
     provider.rememberPortion(item.name, grams); // portion memory (grams)
     final gStr = grams == grams.roundToDouble()
@@ -1023,7 +1023,7 @@ class _AddFoodSheetState extends State<_AddFoodSheet> {
   }
 
   void _addItemWithQty(BuildContext ctx, FoodItem item, double servings) {
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     final provider = ctx.read<FitnessProvider>();
     provider.rememberPortion(item.name, servings); // portion memory (servings)
     // Format whole servings as "2×" not "2.0×"; keep one decimal for halves.
@@ -1070,7 +1070,7 @@ class _AddFoodSheetState extends State<_AddFoodSheet> {
           color: const Color(0xFFFF9F0A));
       return;
     }
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     final provider = ctx.read<FitnessProvider>();
     // If this custom add is filling a barcode gap (a scan that resolved
     // nothing), remember the product BY BARCODE so the next scan is instant and
@@ -1223,7 +1223,7 @@ class _AddFoodSheetState extends State<_AddFoodSheet> {
               ? const Color(0xFFFF9F0A)
               : Colors.white.withValues(alpha: 0.35)),
       onPressed: () {
-        HapticFeedback.selectionClick();
+        Haptics.selection();
         context.read<FitnessProvider>().toggleFavoriteFood(item.name);
       },
     );
@@ -1534,6 +1534,11 @@ class _AddFoodSheetState extends State<_AddFoodSheet> {
                     ),
                   ),
                 ),
+              ),
+            if (GeminiVisionService.isConfigured)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 4),
+                child: ScanQuotaCaption(),
               ),
 
             // Meal type chips

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/fitness_provider.dart';
+import '../services/haptics.dart';
 
 class SupplementsScreen extends StatelessWidget {
   final bool embedded;
@@ -38,7 +38,7 @@ class SupplementsScreen extends StatelessWidget {
               ? const Color(0xFF30D158)
               : const Color(0xFF8E8E93),
           onToggle: (val) {
-            HapticFeedback.selectionClick();
+            Haptics.selection();
             p.updateSupplement('whey', val);
           },
         ),
@@ -57,7 +57,7 @@ class SupplementsScreen extends StatelessWidget {
           nutritionSubtitle: '3–5g · 0 kcal · performance',
           nutritionColor: const Color(0xFF8E8E93),
           onToggle: (val) {
-            HapticFeedback.selectionClick();
+            Haptics.selection();
             p.updateSupplement('creatine', val);
           },
         ),
@@ -76,7 +76,7 @@ class SupplementsScreen extends StatelessWidget {
           nutritionSubtitle: 'Micronutrients · 0 kcal',
           nutritionColor: const Color(0xFF8E8E93),
           onToggle: (val) {
-            HapticFeedback.selectionClick();
+            Haptics.selection();
             p.updateSupplement('multivitamin', val);
           },
         ),

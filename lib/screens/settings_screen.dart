@@ -4,9 +4,11 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import '../app_info.dart';
+import '../models/models.dart' show GoalDirection;
 import '../theme/app_tokens.dart';
 import '../providers/fitness_provider.dart';
 import '../services/cloud_backup_service.dart';
+import '../services/haptics.dart';
 import '../services/on_device_ai_service.dart';
 import '../services/gemini_text_service.dart';
 import '../widgets/input_formatters.dart';
@@ -579,6 +581,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           // ── GOALS ─────────────────────────────────────────────────
           _Header('Goals'),
+          _GoalDirectionTile(),
+          const SizedBox(height: 8),
           _Tile(
             icon: Icons.flag_outlined,
             title: 'Daily Calorie Goal',
@@ -645,6 +649,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onSave: (v) => p.saveWaterGoal(v),
             ),
           ),
+          const SizedBox(height: 20),
+
+          // ── PREFERENCES ───────────────────────────────────────────
+          _Header('Preferences'),
+          _HapticsTile(),
           const SizedBox(height: 20),
 
           // ── AI COACH ──────────────────────────────────────────────
@@ -854,6 +863,153 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+// ── Goal-direction selector (lose / maintain / gain) ────────────────────────
+class _GoalDirectionTile extends StatelessWidget {
+  static String _label(GoalDirection d) => switch (d) {
+        GoalDirection.lose => 'Lose',
+        GoalDirection.maintain => 'Maintain',
+        GoalDirection.gain => 'Gain',
+      };
+
+  static String _subtitle(GoalDirection d) => switch (d) {
+        GoalDirection.lose => 'Calorie target sits below maintenance for fat loss',
+        GoalDirection.maintain => 'Calorie target holds at maintenance',
+        GoalDirection.gain => 'Calorie target sits above maintenance for lean gain',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.watch<FitnessProvider>();
+    final current = p.goalDirection;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: BoxDecoration(color: AppColors.card, borderRadius: AppRadii.rMd),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: const [
+          Icon(Icons.swap_vert_rounded, color: AppColors.green, size: 20),
+          SizedBox(width: 12),
+          Text('Goal',
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.white)),
+        ]),
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.only(left: 32),
+          child: Text(_subtitle(current),
+              style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            for (final d in GoalDirection.values)
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                      right: d == GoalDirection.values.last ? 0 : 8),
+                  child: _DirChip(
+                    label: _label(d),
+                    selected: d == current,
+                    onTap: () {
+                      Haptics.selection();
+                      context.read<FitnessProvider>().saveGoalDirection(d);
+                    },
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ]),
+    );
+  }
+}
+
+class _DirChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DirChip(
+      {required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        height: 44,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.green.withValues(alpha: 0.18)
+              : AppColors.surface2,
+          borderRadius: AppRadii.rSm,
+          border: Border.all(
+              color: selected ? AppColors.green : AppColors.border,
+              width: selected ? 1.5 : 1),
+        ),
+        child: Text(label,
+            style: TextStyle(
+                color: selected ? AppColors.green : Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w600)),
+      ),
+    );
+  }
+}
+
+// ── Haptic feedback toggle ──────────────────────────────────────────────────
+class _HapticsTile extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final p = context.watch<FitnessProvider>();
+    return Material(
+      color: AppColors.card,
+      borderRadius: AppRadii.rMd,
+      clipBehavior: Clip.antiAlias,
+      child: SwitchListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        secondary: const Icon(Icons.vibration_rounded, color: AppColors.green),
+        title: const Text('Haptic feedback',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        subtitle: Text(
+          p.hapticsEnabled
+              ? 'Subtle vibrations on taps, toggles & scrolling'
+              : 'Off — no vibrations',
+          style: const TextStyle(color: AppColors.muted, fontSize: 12),
+        ),
+        value: p.hapticsEnabled,
+        activeThumbColor: AppColors.green,
+        onChanged: (v) {
+          context.read<FitnessProvider>().saveHapticsEnabled(v);
+          if (v) Haptics.selection(); // confirm ON with a tick
+        },
+      ),
+    );
+  }
+}
+
+/// Direction-aware "why" line under the calorie recommendation row.
+String _calorieReason(FitnessProvider p) {
+  final base = p.bestTdee?.round().toString() ?? '—';
+  final calibrated = p.isTdeeCalibrated;
+  switch (p.goalDirection) {
+    case GoalDirection.lose:
+      return calibrated
+          ? 'Real maintenance $base kcal − 500 ✓ calibrated'
+          : 'Est. TDEE $base kcal − 500 (0.5 kg/wk loss)';
+    case GoalDirection.maintain:
+      return calibrated
+          ? 'Real maintenance $base kcal ✓ calibrated'
+          : 'Est. TDEE $base kcal (hold weight)';
+    case GoalDirection.gain:
+      return calibrated
+          ? 'Real maintenance $base kcal + 350 ✓ calibrated'
+          : 'Est. TDEE $base kcal + 350 (lean gain)';
+  }
+}
+
 // ── Smart goal recommendations tile ─────────────────────────────────────────
 
 class _SmartGoalsTile extends StatelessWidget {
@@ -903,9 +1059,7 @@ class _SmartGoalsTile extends StatelessWidget {
             label: 'Calories',
             current: '${p.calorieGoal} kcal',
             recommended: '$rCal kcal',
-            reason: p.isTdeeCalibrated
-                ? 'Real maintenance ${p.bestTdee?.round() ?? "—"} kcal − 500 ✓ calibrated'
-                : 'Est. TDEE ${p.bestTdee?.round() ?? "—"} kcal − 500 (0.5 kg/wk loss)',
+            reason: _calorieReason(p),
             matches: (rCal - p.calorieGoal).abs() <= 50,
           ),
 
@@ -958,6 +1112,7 @@ class _SmartGoalsTile extends StatelessWidget {
           width: double.infinity,
           child: FilledButton.icon(
             onPressed: () async {
+              Haptics.success();
               if (rCal != null) await p.saveCalorieGoal(rCal);
               await p.saveProteinGoal(rProt);
               if (rCarb != null) await p.saveCarbGoal(rCarb);

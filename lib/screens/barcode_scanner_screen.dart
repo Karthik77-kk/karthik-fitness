@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import '../services/haptics.dart';
 import '../widgets/input_formatters.dart';
 
 /// Full-screen barcode scanner. Pops with the detected barcode [String] on the
@@ -41,7 +41,7 @@ class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
         .firstWhere((v) => v != null && v.trim().isNotEmpty, orElse: () => null);
     if (code == null) return;
     _handled = true;
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     Navigator.of(context).pop(code.trim());
   }
 

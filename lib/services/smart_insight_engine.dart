@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
-import '../models/models.dart' show walkCaloriesForMinutes;
+import '../models/models.dart' show walkCaloriesForMinutes, GoalDirection;
 import '../providers/fitness_provider.dart';
+import '../theme/app_tokens.dart';
 
-// ─── Palette (mirror of home_screen) ─────────────────────────────────────────
-const _kGreen = Color(0xFF30D158);
-const _kBlue = Color(0xFF40C8E0);
-const _kRed = Color(0xFFFF453A);
-const _kOrange = Color(0xFFFF9F0A);
+// ─── Palette ─────────────────────────────────────────────────────────────────
+// Sourced from the design tokens (no raw hex redeclared here) — kept as short
+// local aliases only because they're referenced dozens of times below.
+const _kGreen = AppColors.green;
+const _kBlue = AppColors.blue;
+const _kRed = AppColors.red;
+const _kOrange = AppColors.orange;
 
 /// Category — used to keep the top-N insights varied (max one per category).
 enum InsightCategory {
@@ -221,7 +224,10 @@ List<Insight> generateInsights(FitnessProvider p, DateTime now) {
   }
 
   // ── Nutrition: over goal today ────────────────────────────────────────────
-  if (todayCal > goal + 400) {
+  // Only a problem when the user is cutting or maintaining — for a gain goal,
+  // being over the calorie target is on-plan, so this "skip the snack" nudge is
+  // suppressed (see the direction-aware EOD projection below for gain framing).
+  if (!p.wantsSurplus && todayCal > goal + 400) {
     out.add(Insight(
       emoji: '🚨',
       title: '${todayCal - goal} kcal over goal',
@@ -319,27 +325,33 @@ List<Insight> generateInsights(FitnessProvider p, DateTime now) {
   }
 
   // ── Workout: days since last session ──────────────────────────────────────
-  final dslw = p.daysSinceLastWorkout;
-  if (dslw >= 3 && dslw < 900) {
-    out.add(Insight(
-      emoji: '🏋️',
-      title: '$dslw days since your last workout',
-      body: 'Momentum fades after 3 days off. Even a 20-min session today '
-          '(push-ups, squats, plank) keeps the habit and the muscle.',
-      accent: _kOrange,
-      category: InsightCategory.workout,
-      score: 73,
-    ));
-  } else if (p.workoutStreak >= 7) {
-    out.add(Insight(
-      emoji: '🔥',
-      title: '${p.workoutStreak}-day workout streak!',
-      body: 'Top-tier consistency. Past 21 days this becomes identity, not '
-          'discipline. Keep the chain unbroken.',
-      accent: _kOrange,
-      category: InsightCategory.workout,
-      score: 42,
-    ));
+  // Gate on hasEverLoggedWorkout so a user who has never trained never sees the
+  // nonsensical "999 days since your last workout" (daysSinceLastWorkout returns
+  // the 999 sentinel when there's no history). Replaces the old magic `< 900`
+  // guard. The friendly first-time nudge lives in the notification panel.
+  if (p.hasEverLoggedWorkout) {
+    final dslw = p.daysSinceLastWorkout;
+    if (dslw >= 3) {
+      out.add(Insight(
+        emoji: '🏋️',
+        title: '$dslw days since your last workout',
+        body: 'Momentum fades after 3 days off. Even a 20-min session today '
+            '(push-ups, squats, plank) keeps the habit and the muscle.',
+        accent: _kOrange,
+        category: InsightCategory.workout,
+        score: 73,
+      ));
+    } else if (p.workoutStreak >= 7) {
+      out.add(Insight(
+        emoji: '🔥',
+        title: '${p.workoutStreak}-day workout streak!',
+        body: 'Top-tier consistency. Past 21 days this becomes identity, not '
+            'discipline. Keep the chain unbroken.',
+        accent: _kOrange,
+        category: InsightCategory.workout,
+        score: 42,
+      ));
+    }
   }
 
   // ── Workout: weekly frequency low late in week ────────────────────────────
@@ -464,30 +476,66 @@ List<Insight> generateInsights(FitnessProvider p, DateTime now) {
   }
 
   // ── Predictive: end-of-day calorie projection ─────────────────────────────
+  // Direction-aware: for a LOSE goal, finishing over the target is the problem;
+  // for a GAIN goal it's the reverse (finishing under means too little to grow);
+  // for MAINTAIN, drifting far off the target either way is the nudge.
   final eodCal = p.projectedEodCalories;
   if (eodCal != null) {
-    if (eodCal > goal + 200) {
-      out.add(Insight(
-        emoji: '🔮',
-        title: 'On track to finish ~${eodCal.round()} kcal',
-        body: 'At your usual ${_weekdayNames[now.weekday - 1]} pace you\'ll end '
-            '~${(eodCal - goal).round()} kcal over your ${goal} goal. Skip the '
-            'evening snack or take a 30-min walk to land on target.',
-        accent: _kOrange,
-        category: InsightCategory.prediction,
-        score: 64,
-      ));
-    } else if (eodCal < goal - 350 && now.hour >= 18) {
-      out.add(Insight(
-        emoji: '🔮',
-        title: 'Heading for only ~${eodCal.round()} kcal',
-        body: 'You\'re projected to finish well under your ${goal} goal — '
-            'under-eating stalls fat loss and costs muscle. A balanced dinner '
-            'with protein keeps the deficit sustainable.',
-        accent: _kBlue,
-        category: InsightCategory.prediction,
-        score: 60,
-      ));
+    final over = eodCal - goal; // +ve = projected over the goal
+    switch (p.goalDirection) {
+      case GoalDirection.gain:
+        if (over < -200 && now.hour >= 15) {
+          out.add(Insight(
+            emoji: '🔮',
+            title: 'On track to finish ~${eodCal.round()} kcal',
+            body: 'At your usual ${_weekdayNames[now.weekday - 1]} pace you\'ll '
+                'end ~${(-over).round()} kcal under your ${goal} goal — too '
+                'light to build. Add a calorie-dense snack (nuts, peanut butter, '
+                'a shake) to reach your surplus.',
+            accent: _kOrange,
+            category: InsightCategory.prediction,
+            score: 64,
+          ));
+        }
+      case GoalDirection.maintain:
+        if (over.abs() > 300) {
+          out.add(Insight(
+            emoji: '🔮',
+            title: 'On track to finish ~${eodCal.round()} kcal',
+            body: over > 0
+                ? 'That\'s ~${over.round()} kcal over your ${goal} maintenance '
+                    'goal. Ease off at dinner or add a short walk to stay level.'
+                : 'That\'s ~${(-over).round()} kcal under your ${goal} '
+                    'maintenance goal. A balanced dinner keeps your energy steady.',
+            accent: _kBlue,
+            category: InsightCategory.prediction,
+            score: 60,
+          ));
+        }
+      case GoalDirection.lose:
+        if (over > 200) {
+          out.add(Insight(
+            emoji: '🔮',
+            title: 'On track to finish ~${eodCal.round()} kcal',
+            body: 'At your usual ${_weekdayNames[now.weekday - 1]} pace you\'ll '
+                'end ~${over.round()} kcal over your ${goal} goal. Skip the '
+                'evening snack or take a 30-min walk to land on target.',
+            accent: _kOrange,
+            category: InsightCategory.prediction,
+            score: 64,
+          ));
+        } else if (eodCal < goal - 350 && now.hour >= 18) {
+          out.add(Insight(
+            emoji: '🔮',
+            title: 'Heading for only ~${eodCal.round()} kcal',
+            body: 'You\'re projected to finish well under your ${goal} goal — '
+                'under-eating stalls fat loss and costs muscle. A balanced dinner '
+                'with protein keeps the deficit sustainable.',
+            accent: _kBlue,
+            category: InsightCategory.prediction,
+            score: 60,
+          ));
+        }
     }
   }
 
@@ -534,7 +582,9 @@ List<Insight> generateInsights(FitnessProvider p, DateTime now) {
   }
 
   // ── Habit pattern: deficit streak ─────────────────────────────────────────
-  final defStreak = p.deficitStreak;
+  // Only a win when the user is actually trying to lose — a bulking or
+  // maintaining user shouldn't be congratulated for a calorie deficit.
+  final defStreak = p.wantsDeficit ? p.deficitStreak : 0;
   if (defStreak >= 7) {
     out.add(Insight(
       emoji: '🏆',

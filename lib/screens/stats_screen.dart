@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
+import '../services/haptics.dart';
 import '../widgets/input_formatters.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
@@ -99,7 +99,7 @@ class _StatsScreenState extends State<StatsScreen>
 
   Future<void> _saveEntries() async {
     FocusScope.of(context).unfocus();
-    HapticFeedback.mediumImpact();
+    Haptics.impact();
     final p = context.read<FitnessProvider>();
 
     final weight = double.tryParse(_weightCtrl.text.trim());
@@ -165,7 +165,7 @@ class _StatsScreenState extends State<StatsScreen>
   }
 
   void _showError(String msg) {
-    HapticFeedback.lightImpact();
+    Haptics.warning();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('⚠️ $msg'),

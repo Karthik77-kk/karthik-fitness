@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../models/models.dart' show GoalDirection;
+import '../services/haptics.dart';
 import '../widgets/input_formatters.dart';
 import '../providers/fitness_provider.dart';
 import '../main.dart' show MainNavigationScreen;
@@ -28,6 +30,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   // gave every woman a male BMR/TDEE (~165 kcal/day too high) until she found
   // the toggle buried in Stats.
   bool? _sexIsMale;
+  // Goal direction — defaults to the app's fat-loss focus; the user can change
+  // it here (and later in Settings). Saved explicitly on finish.
+  GoalDirection _goalDir = GoalDirection.lose;
   int _currentPage = 0;
 
   @override
@@ -82,6 +87,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     if (age != null && age > 0) await provider.saveAge(age);
     final goal = double.tryParse(_goalController.text.trim());
     if (goal != null && goal > 0) await provider.saveGoalWeight(goal);
+    await provider.saveGoalDirection(_goalDir);
     final weight = double.tryParse(_weightController.text.trim());
     if (weight != null && weight > 0) {
       await provider.logBodyEntry(weightKg: weight);
@@ -114,7 +120,15 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ageController: _ageController,
                     goalController: _goalController,
                     sexIsMale: _sexIsMale,
-                    onSexChanged: (v) => setState(() => _sexIsMale = v),
+                    onSexChanged: (v) {
+                      Haptics.selection();
+                      setState(() => _sexIsMale = v);
+                    },
+                    goalDir: _goalDir,
+                    onGoalDirChanged: (d) {
+                      Haptics.selection();
+                      setState(() => _goalDir = d);
+                    },
                   ),
                   _ActivityPermissionPage(onFinish: _finish),
                 ],
@@ -193,7 +207,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         // rest of its fields stay optional.
                         onPressed: (_currentPage == 1 && _sexIsMale == null)
                             ? null
-                            : () => _goToPage(_currentPage + 1),
+                            : () {
+                                Haptics.tap();
+                                _goToPage(_currentPage + 1);
+                              },
                         style: ElevatedButton.styleFrom(
                           // Soften (not disable) the Welcome button until a name
                           // is entered.
@@ -342,6 +359,8 @@ class _ProfilePage extends StatelessWidget {
   final TextEditingController goalController;
   final bool? sexIsMale;
   final ValueChanged<bool> onSexChanged;
+  final GoalDirection goalDir;
+  final ValueChanged<GoalDirection> onGoalDirChanged;
 
   const _ProfilePage({
     required this.weightController,
@@ -350,7 +369,15 @@ class _ProfilePage extends StatelessWidget {
     required this.goalController,
     required this.sexIsMale,
     required this.onSexChanged,
+    required this.goalDir,
+    required this.onGoalDirChanged,
   });
+
+  static String _goalLabel(GoalDirection d) => switch (d) {
+        GoalDirection.lose => 'Lose',
+        GoalDirection.maintain => 'Maintain',
+        GoalDirection.gain => 'Gain',
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -473,7 +500,72 @@ class _ProfilePage extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 20),
+
+          // Goal direction — drives the calorie target & coaching tone.
+          const Text(
+            'YOUR GOAL',
+            style: TextStyle(
+              color: _kSecond,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              for (final d in GoalDirection.values)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                        right: d == GoalDirection.values.last ? 0 : 10),
+                    child: _GoalDirButton(
+                      label: _goalLabel(d),
+                      selected: d == goalDir,
+                      onTap: () => onGoalDirChanged(d),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ],
+      ),
+    );
+  }
+}
+
+class _GoalDirButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _GoalDirButton(
+      {required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        height: 48,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? _kGreen.withValues(alpha: 0.18) : _kCard,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? _kGreen : _kSecond.withValues(alpha: 0.25),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? _kGreen : Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ),
     );
   }

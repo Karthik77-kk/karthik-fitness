@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../providers/fitness_provider.dart';
+import '../services/food_repository.dart';
 import '../services/gemini_vision_service.dart';
+import '../services/haptics.dart';
+import '../theme/app_tokens.dart';
 import '../widgets/input_formatters.dart';
 
 /// Full-screen review of an AI meal scan. Every detected food is editable —
-/// rename (free text or pick from the food DB), tweak macros, remove — then
-/// "Add all" logs them to the chosen meal. The food DB search fills a row's
-/// name + macros from a known item.
+/// rename (free text or pick from the food DB + IFCT), edit the portion in
+/// grams (which proportionally rescales the macros), tweak macros, remove —
+/// then "Add all" logs them to the chosen meal.
 class MealScanResultScreen extends StatefulWidget {
   final List<ScannedFood> foods;
   const MealScanResultScreen({super.key, required this.foods});
@@ -18,25 +21,67 @@ class MealScanResultScreen extends StatefulWidget {
 }
 
 class _EditRow {
+  /// The current baseline for proportional rescaling — the original scan, or the
+  /// last DB pick, captured at its own gram weight. Editing the grams field
+  /// scales macros from this via [rescaleScannedFood].
+  ScannedFood base;
+
   final TextEditingController name;
+  final TextEditingController grams;
   final TextEditingController kcal;
   final TextEditingController protein;
   final TextEditingController carbs;
   final TextEditingController fat;
-  final double grams;
   double confidence;
 
   _EditRow(ScannedFood f)
-      : name = TextEditingController(text: f.name),
+      : base = f,
+        name = TextEditingController(text: f.name),
+        grams = TextEditingController(
+            text: f.grams > 0 ? f.grams.round().toString() : ''),
         kcal = TextEditingController(text: f.kcal.round().toString()),
         protein = TextEditingController(text: f.protein.round().toString()),
         carbs = TextEditingController(text: f.carbs.round().toString()),
         fat = TextEditingController(text: f.fat.round().toString()),
-        grams = f.grams,
         confidence = f.confidence;
+
+  double get gramsValue => double.tryParse(grams.text) ?? 0;
+
+  /// Rescale the macro fields to the current grams, from [base]. Guards grams=0
+  /// (and an unknown original portion) by leaving the macros untouched.
+  void applyGrams() {
+    final g = gramsValue;
+    if (g <= 0) return;
+    final scaled = rescaleScannedFood(base, g);
+    kcal.text = scaled.kcal.round().toString();
+    protein.text = scaled.protein.round().toString();
+    carbs.text = scaled.carbs.round().toString();
+    fat.text = scaled.fat.round().toString();
+  }
+
+  /// Replace name + macros from a picked food, and re-baseline so later grams
+  /// edits scale from these new values at the current grams.
+  void applyPick(FoodItem item) {
+    name.text = item.name;
+    kcal.text = item.calories.round().toString();
+    protein.text = item.protein.round().toString();
+    carbs.text = item.carbs.round().toString();
+    fat.text = item.fat.round().toString();
+    confidence = 1.0; // user-confirmed via DB
+    base = ScannedFood(
+      name: item.name,
+      grams: gramsValue, // 0 when blank — rescale then no-ops, which is correct
+      kcal: item.calories,
+      protein: item.protein,
+      carbs: item.carbs,
+      fat: item.fat,
+      confidence: 1.0,
+    );
+  }
 
   void dispose() {
     name.dispose();
+    grams.dispose();
     kcal.dispose();
     protein.dispose();
     carbs.dispose();
@@ -47,10 +92,6 @@ class _EditRow {
 class _MealScanResultScreenState extends State<MealScanResultScreen> {
   late final List<_EditRow> _rows;
   late MealType _meal;
-
-  static const _green = Color(0xFF30D158);
-  static const _card = Color(0xFF1C1C1E);
-  static const _muted = Color(0xFF8E8E93);
 
   @override
   void initState() {
@@ -85,20 +126,14 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
     final picked = await showModalBottomSheet<FoodItem>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: _card,
+      backgroundColor: AppColors.card,
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadii.lg))),
       builder: (_) => const _FoodDbPicker(),
     );
     if (picked == null) return;
-    setState(() {
-      row.name.text = picked.name;
-      row.kcal.text = picked.calories.round().toString();
-      row.protein.text = picked.protein.round().toString();
-      row.carbs.text = picked.carbs.round().toString();
-      row.fat.text = picked.fat.round().toString();
-      row.confidence = 1.0; // user-confirmed via DB
-    });
+    Haptics.selection();
+    setState(() => row.applyPick(picked));
   }
 
   Future<void> _addAll() async {
@@ -108,6 +143,7 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
       final name = r.name.text.trim();
       final kcal = double.tryParse(r.kcal.text) ?? 0;
       if (name.isEmpty || kcal <= 0) continue;
+      final grams = r.gramsValue;
       await p.addFoodEntry(FoodEntry(
         id: p.newId(),
         name: name,
@@ -118,18 +154,19 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
         macrosKnown: true,
         mealType: _meal,
         timestamp: DateTime.now(),
-        servingNote: r.grams > 0 ? '~${r.grams.round()} g · AI scan' : 'AI scan',
+        servingNote: grams > 0 ? '~${grams.round()} g · AI scan' : 'AI scan',
       ));
       added++;
     }
     if (!mounted) return;
+    Haptics.success();
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
       ..showSnackBar(SnackBar(
         content: Text(
             'Added $added item${added == 1 ? '' : 's'} to ${_mealLabel(_meal)}'),
-        backgroundColor: _green,
+        backgroundColor: AppColors.green,
         duration: const Duration(seconds: 2),
       ));
   }
@@ -145,7 +182,9 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
               padding: const EdgeInsets.only(right: 16),
               child: Text('$_totalKcal kcal',
                   style: const TextStyle(
-                      color: _green, fontWeight: FontWeight.w700, fontSize: 15)),
+                      color: AppColors.green,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15)),
             ),
           ),
         ],
@@ -153,12 +192,12 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
       body: Column(
         children: [
           _mealSelector(),
-          const Divider(height: 1, color: Color(0xFF2C2C2E)),
+          const Divider(height: 1, color: AppColors.surface2),
           Expanded(
             child: _rows.isEmpty
                 ? const Center(
                     child: Text('No items — go back and rescan.',
-                        style: TextStyle(color: _muted)))
+                        style: TextStyle(color: AppColors.muted)))
                 : ListView.builder(
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                     itemCount: _rows.length,
@@ -182,17 +221,19 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
             child: ChoiceChip(
               label: Text(_mealLabel(m)),
               selected: sel,
-              onSelected: (_) => setState(() => _meal = m),
-              selectedColor: _green.withValues(alpha: 0.2),
-              backgroundColor: const Color(0xFF2C2C2E),
+              onSelected: (_) {
+                Haptics.selection();
+                setState(() => _meal = m);
+              },
+              selectedColor: AppColors.green.withValues(alpha: 0.2),
+              backgroundColor: AppColors.surface2,
               labelStyle: TextStyle(
-                  color: sel ? _green : _muted,
+                  color: sel ? AppColors.green : AppColors.muted,
                   fontSize: 13,
                   fontWeight: sel ? FontWeight.w600 : FontWeight.normal),
-              side: BorderSide(
-                  color: sel ? _green : const Color(0xFF38383A)),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20)),
+              side: BorderSide(color: sel ? AppColors.green : AppColors.border),
+              shape:
+                  RoundedRectangleBorder(borderRadius: AppRadii.rLg),
             ),
           );
         }).toList(),
@@ -205,8 +246,8 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.fromLTRB(12, 12, 4, 12),
       decoration: BoxDecoration(
-        color: _card,
-        borderRadius: BorderRadius.circular(14),
+        color: AppColors.card,
+        borderRadius: AppRadii.rMd,
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
       child: Column(
@@ -230,9 +271,9 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
                       filled: true,
                       fillColor: Colors.white.withValues(alpha: 0.05),
                       hintText: 'Food name',
-                      hintStyle: const TextStyle(color: _muted),
+                      hintStyle: const TextStyle(color: AppColors.muted),
                       border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: AppRadii.rSm,
                           borderSide: BorderSide.none),
                       contentPadding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 11),
@@ -243,43 +284,85 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
                   const Padding(
                     padding: EdgeInsets.only(left: 2),
                     child: Icon(Icons.help_outline_rounded,
-                        size: 16, color: Color(0xFFFF9F0A)),
+                        size: 16, color: AppColors.orange),
                   ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
-                  icon:
-                      const Icon(Icons.search_rounded, size: 20, color: _muted),
+                  icon: const Icon(Icons.search_rounded,
+                      size: 20, color: AppColors.muted),
                   tooltip: 'Replace from food database',
                   onPressed: () => _pickFromDb(r),
                 ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.close_rounded,
-                      size: 20, color: Color(0xFFFF453A)),
+                      size: 20, color: AppColors.red),
                   tooltip: 'Remove',
-                  onPressed: () => setState(() {
-                    _rows.removeAt(i).dispose();
-                  }),
+                  onPressed: () {
+                    Haptics.tap();
+                    setState(() => _rows.removeAt(i).dispose());
+                  },
                 ),
               ],
             ),
           ),
-          if (r.grams > 0)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(2, 8, 0, 8),
-              child: Text('~${r.grams.round()} g estimated',
-                  style: const TextStyle(color: _muted, fontSize: 11)),
-            )
-          else
-            const SizedBox(height: 10),
+          const SizedBox(height: 8),
+          // Editable portion — rescales macros proportionally on change.
+          _gramsField(r),
+          const SizedBox(height: 8),
           Row(
             children: [
-              _macroField(r.kcal, 'KCAL', const Color(0xFFFF453A)),
-              _macroField(r.protein, 'PROTEIN', _green),
-              _macroField(r.carbs, 'CARBS', const Color(0xFFFF9F0A)),
-              _macroField(r.fat, 'FAT', const Color(0xFF40C8E0)),
+              _macroField(r.kcal, 'KCAL', AppColors.red),
+              _macroField(r.protein, 'PROTEIN', AppColors.green),
+              _macroField(r.carbs, 'CARBS', AppColors.orange),
+              _macroField(r.fat, 'FAT', AppColors.blue),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _gramsField(_EditRow r) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Row(
+        children: [
+          const Icon(Icons.scale_outlined, size: 15, color: AppColors.muted),
+          const SizedBox(width: 6),
+          const Text('Portion',
+              style: TextStyle(
+                  fontSize: 12,
+                  color: AppColors.muted,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 78,
+            child: TextField(
+              controller: r.grams,
+              keyboardType: TextInputType.number,
+              inputFormatters: positiveIntInput,
+              onChanged: (_) => setState(() => r.applyGrams()),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14),
+              decoration: InputDecoration(
+                isDense: true,
+                filled: true,
+                fillColor: Colors.white.withValues(alpha: 0.05),
+                hintText: '—',
+                hintStyle: const TextStyle(color: AppColors.muted),
+                border: OutlineInputBorder(
+                    borderRadius: AppRadii.rSm, borderSide: BorderSide.none),
+                contentPadding: const EdgeInsets.symmetric(vertical: 9),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          const Text('g',
+              style: TextStyle(color: AppColors.muted, fontSize: 13)),
         ],
       ),
     );
@@ -293,7 +376,7 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
           Text(label,
               style: const TextStyle(
                   fontSize: 10,
-                  color: _muted,
+                  color: AppColors.muted,
                   fontWeight: FontWeight.w600,
                   letterSpacing: 0.3)),
           const SizedBox(height: 4),
@@ -310,8 +393,7 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
               filled: true,
               fillColor: Colors.white.withValues(alpha: 0.05),
               border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide.none),
+                  borderRadius: AppRadii.rSm, borderSide: BorderSide.none),
               contentPadding: const EdgeInsets.symmetric(vertical: 9),
             ),
           ),
@@ -327,11 +409,10 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
         width: double.infinity,
         child: ElevatedButton(
           style: ElevatedButton.styleFrom(
-            backgroundColor: _green,
+            backgroundColor: AppColors.green,
             foregroundColor: Colors.black,
             minimumSize: const Size.fromHeight(52),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(14)),
+            shape: RoundedRectangleBorder(borderRadius: AppRadii.rMd),
           ),
           onPressed: _rows.isEmpty ? null : _addAll,
           child: Text(
@@ -346,7 +427,9 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
   }
 }
 
-/// Searchable picker over the local food DB (+ IFCT), returns the chosen item.
+/// Searchable picker over the local food DB + IFCT (offline), returns the chosen
+/// item. Uses [FoodRepository.searchLocal] — the same curated + 500+ IFCT source
+/// the Add-Food sheet uses — so IFCT-only foods are reachable here too.
 class _FoodDbPicker extends StatefulWidget {
   const _FoodDbPicker();
   @override
@@ -364,14 +447,12 @@ class _FoodDbPickerState extends State<_FoodDbPicker> {
   }
 
   List<FoodItem> get _results {
-    final q = _q.trim().toLowerCase();
-    final base = q.isEmpty
-        ? kFoodDatabase.take(30).toList()
-        : kFoodDatabase
-            .where((f) => f.name.toLowerCase().contains(q))
-            .take(40)
-            .toList();
-    return base;
+    final q = _q.trim();
+    if (q.isEmpty) {
+      // Empty query: browse the curated head (searchLocal returns [] for '').
+      return kFoodDatabase.take(30).toList();
+    }
+    return FoodRepository.instance.searchLocal(q);
   }
 
   @override
@@ -389,7 +470,7 @@ class _FoodDbPickerState extends State<_FoodDbPicker> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                  color: const Color(0xFF8E8E93).withValues(alpha: 0.5),
+                  color: AppColors.muted.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(2)),
             ),
             Padding(
@@ -400,7 +481,8 @@ class _FoodDbPickerState extends State<_FoodDbPicker> {
                 onChanged: (v) => setState(() => _q = v),
                 decoration: const InputDecoration(
                   hintText: 'Search food database…',
-                  prefixIcon: Icon(Icons.search, size: 20, color: Color(0xFF8E8E93)),
+                  prefixIcon:
+                      Icon(Icons.search, size: 20, color: AppColors.muted),
                 ),
               ),
             ),
@@ -415,8 +497,8 @@ class _FoodDbPickerState extends State<_FoodDbPicker> {
                     title: Text(f.name),
                     subtitle: Text(
                       '${f.calories.round()} kcal · ${f.protein.round()}g P · ${f.serving}',
-                      style: const TextStyle(
-                          color: Color(0xFF8E8E93), fontSize: 12),
+                      style:
+                          const TextStyle(color: AppColors.muted, fontSize: 12),
                     ),
                     onTap: () => Navigator.pop(context, f),
                   );

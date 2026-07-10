@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/fitness_provider.dart';
+import '../services/haptics.dart';
 import '../widgets/input_formatters.dart';
 import '../models/models.dart';
 import '../theme/app_tokens.dart';
@@ -412,7 +412,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
                                   name: exerciseName, sets: setLogs));
                             }
                           });
-                          HapticFeedback.lightImpact();
+                          Haptics.tap();
                           Navigator.pop(ctx);
                           ScaffoldMessenger.of(context).clearSnackBars();
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -466,7 +466,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
     final copied = repeatExercises(todays, _exercises);
     if (copied.isEmpty) return; // everything is already in the builder
     setState(() => _exercises.addAll(copied));
-    HapticFeedback.lightImpact();
+    Haptics.tap();
     ScaffoldMessenger.of(context).clearSnackBars();
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       content: Text("Loaded today's exercises — review and Save"),
@@ -476,7 +476,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
 
   void _removeExercise(int index) {
     setState(() => _exercises.removeAt(index));
-    HapticFeedback.mediumImpact();
+    Haptics.impact();
   }
 
   Future<void> _saveWorkout() async {
@@ -497,7 +497,7 @@ class _WorkoutScreenState extends State<WorkoutScreen> {
         exercises: List.from(_exercises),
       );
       await provider.logWorkout(workout);
-      HapticFeedback.heavyImpact();
+      Haptics.success();
       if (mounted) {
         final cals = provider.calculateWorkoutCalories(workout);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(

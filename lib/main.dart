@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'providers/fitness_provider.dart';
 import 'services/cloud_backup_service.dart';
 import 'services/food_repository.dart';
+import 'services/haptics.dart';
 import 'services/nav_router.dart';
 import 'services/on_device_ai_service.dart';
 import 'services/update_service.dart';
@@ -325,6 +326,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
 
   void _onTabTap(int i) {
     if (i == _index) return;
+    Haptics.selection();
     setState(() => _index = i);
     if (reduceMotion(context)) {
       _tabFade.value = 1;
@@ -359,7 +361,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       // IndexedStack keeps all tabs mounted (scroll positions, sub-tab
       // selections, Home's entrance animation) and offstage-hides the inactive
       // ones; the FadeTransition fades the active tab in on each switch.
-      body: Stack(children: [
+      // HapticScroll (one listener for the whole app) gives a subtle edge tick
+      // when any tab's scroll view hits its top/bottom boundary.
+      body: HapticScroll(
+        child: Stack(children: [
         FadeTransition(
           opacity: _tabFade,
           child: IndexedStack(index: _index, children: _screens),
@@ -376,7 +381,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
               ),
             ),
           ),
-      ]),
+      ])),
       bottomNavigationBar: ClipRect(
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),

@@ -10,12 +10,13 @@ import 'package:pedometer/pedometer.dart';
 import 'package:home_widget/home_widget.dart';
 
 import '../models/models.dart';
-import '../services/smart_insight_engine.dart' show topInsights;
+import '../services/smart_insight_engine.dart' show topInsights, Insight;
 import '../services/notification_center.dart';
 import '../services/chat_session_service.dart';
 import '../services/food_repository.dart' show normalizeFood, FoodRepository;
 import '../services/gemini_text_service.dart';
 import '../services/integrity_check_service.dart';
+import '../services/haptics.dart';
 
 /// Where the AI coach runs: on-device Gemma (offline, private, ~600 MB download)
 /// or a cheap/fast cloud model (Gemini Flash-Lite — needs internet + the built-in
@@ -23,6 +24,20 @@ import '../services/integrity_check_service.dart';
 enum AiCoachMode { local, cloud }
 
 class FitnessProvider extends ChangeNotifier {
+  // ── Data-version counter (hot-path memoization) ────────────────────────────
+  // Bumped on every [notifyListeners] — i.e. on every state mutation — so
+  // memoized derived values (the insight snapshot, the merged food/water maps)
+  // can cheaply detect "did anything change since I last computed?" without
+  // re-deriving on rebuilds that carry no data change. Correct by construction:
+  // any mutation that matters already calls notifyListeners.
+  int _dataVersion = 0;
+
+  @override
+  void notifyListeners() {
+    _dataVersion++;
+    super.notifyListeners();
+  }
+
   // ── Daily targets (defaults — overridden by user settings) ────────────────
   static const int kDefaultCalorieGoal = 1700;
   static const int kDefaultProteinGoal = 100;
@@ -199,6 +214,55 @@ class FitnessProvider extends ChangeNotifier {
 
   double _goalWeightKg = 70.0;
   double get goalWeightKg => _goalWeightKg;
+
+  // ── Goal direction (lose / maintain / gain) ────────────────────────────────
+  // Drives the calorie recommendation and flips the coaching copy. Defaults to
+  // [GoalDirection.lose] for a brand-new profile; existing users are migrated
+  // once in [loadData] by inferring from goal vs current weight.
+  GoalDirection _goalDirection = GoalDirection.lose;
+  GoalDirection get goalDirection => _goalDirection;
+
+  /// True when the user is bulking — being *under* the calorie goal is the
+  /// problem, not the win. The insight/notification copy reads this.
+  bool get wantsSurplus => _goalDirection == GoalDirection.gain;
+
+  /// True when the user is cutting — the classic fat-loss framing applies.
+  bool get wantsDeficit => _goalDirection == GoalDirection.lose;
+
+  Future<void> saveGoalDirection(GoalDirection dir) async {
+    _goalDirection = dir;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('goal_direction', dir.name);
+    notifyListeners();
+  }
+
+  /// Infers a goal direction from goal weight vs current weight — goal clearly
+  /// below current → lose, clearly above → gain, within ~1 kg → maintain. Used
+  /// as the one-time migration default for users predating the setting.
+  static GoalDirection inferGoalDirection(
+      {required double goalWeightKg, double? currentWeightKg}) {
+    final current = currentWeightKg;
+    if (current == null) return GoalDirection.lose; // no data — keep old default
+    final delta = goalWeightKg - current; // +ve = goal above current = gain
+    if (delta > 1.0) return GoalDirection.gain;
+    if (delta < -1.0) return GoalDirection.lose;
+    return GoalDirection.maintain;
+  }
+
+  // ── Haptic feedback preference ─────────────────────────────────────────────
+  // Governs the app-wide [Haptics] helper. Defaults on. The static
+  // [Haptics.enabled] flag is kept in sync here so every widget can fire a
+  // haptic without reading the provider.
+  bool _hapticsEnabled = true;
+  bool get hapticsEnabled => _hapticsEnabled;
+
+  Future<void> saveHapticsEnabled(bool value) async {
+    _hapticsEnabled = value;
+    Haptics.enabled = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('haptics_enabled', value);
+    notifyListeners();
+  }
 
   String _userName = 'Friend';
   String get userName => _userName;
@@ -432,13 +496,47 @@ class FitnessProvider extends ChangeNotifier {
       _measurementHistory.isEmpty ? null : _measurementHistory.last;
   bool get isLoaded => _isLoaded;
 
+  // Memoized merged maps (C2). These getters used to allocate a fresh map on
+  // every call — hot on the AI-context / history / insight paths. The merge is
+  // rebuilt only when [_dataVersion] moves (any mutation) or the day rolls over.
+  // Callers treat the result read-only (verified across the codebase).
+  Map<String, List<FoodEntry>>? _foodHistoryCache;
+  int _foodHistoryCacheVersion = -1;
+  String _foodHistoryCacheDay = '';
+
   /// All food entries keyed by 'YYYY-MM-DD', including today's.
-  Map<String, List<FoodEntry>> get foodHistory =>
-      {..._foodHistory, _todayKey: _todayFood};
+  Map<String, List<FoodEntry>> get foodHistory {
+    final day = _todayKey;
+    if (_foodHistoryCache != null &&
+        _foodHistoryCacheVersion == _dataVersion &&
+        _foodHistoryCacheDay == day) {
+      return _foodHistoryCache!;
+    }
+    final merged = {..._foodHistory, day: _todayFood};
+    _foodHistoryCache = merged;
+    _foodHistoryCacheVersion = _dataVersion;
+    _foodHistoryCacheDay = day;
+    return merged;
+  }
+
+  Map<String, int>? _waterHistoryCache;
+  int _waterHistoryCacheVersion = -1;
+  String _waterHistoryCacheDay = '';
 
   /// Water intake (mL) keyed by 'YYYY-MM-DD', including today's.
-  Map<String, int> get waterHistory =>
-      {..._waterHistory, _todayKey: _todayWaterMl};
+  Map<String, int> get waterHistory {
+    final day = _todayKey;
+    if (_waterHistoryCache != null &&
+        _waterHistoryCacheVersion == _dataVersion &&
+        _waterHistoryCacheDay == day) {
+      return _waterHistoryCache!;
+    }
+    final merged = {..._waterHistory, day: _todayWaterMl};
+    _waterHistoryCache = merged;
+    _waterHistoryCacheVersion = _dataVersion;
+    _waterHistoryCacheDay = day;
+    return merged;
+  }
 
   /// Supplement status keyed by 'YYYY-MM-DD', including today's.
   Map<String, SupplementStatus> get supplementHistory =>
@@ -758,13 +856,31 @@ class FitnessProvider extends ChangeNotifier {
   /// True when [bestTdee] is the data-calibrated value (for "calibrated" UI badges).
   bool get isTdeeCalibrated => adaptiveTdee != null;
 
-  /// Suggested calorie target for fat loss (500 below maintenance).
-  /// Uses [bestTdee] so it reflects real maintenance once data is available.
-  double? get fatLossCalorieTarget {
+  /// Direction-aware daily calorie target from [bestTdee]:
+  ///  • lose     → maintenance − 500   (clamp 1200–2800)
+  ///  • maintain → maintenance          (clamp 1200–3500)
+  ///  • gain     → maintenance + 350    (lean surplus; clamp 1400–4000)
+  /// This is the single source of truth — [recommendedCalorieGoal] and the
+  /// [fatLossCalorieTarget] alias both delegate here, so nothing else assumes a
+  /// hardcoded −500. Null until weight/height/age give a TDEE estimate.
+  double? get _directionCalorieTarget {
     final t = bestTdee;
     if (t == null) return null;
-    return (t - 500).clamp(1200.0, 2800.0);
+    switch (_goalDirection) {
+      case GoalDirection.lose:
+        return (t - 500).clamp(1200.0, 2800.0);
+      case GoalDirection.maintain:
+        return t.clamp(1200.0, 3500.0);
+      case GoalDirection.gain:
+        return (t + 350).clamp(1400.0, 4000.0);
+    }
   }
+
+  /// Suggested daily calorie target. Named for its original fat-loss use; now a
+  /// direction-aware alias of [recommendedCalorieGoal] (kept so existing call
+  /// sites keep compiling). Uses [bestTdee] so it reflects real maintenance once
+  /// data is available.
+  double? get fatLossCalorieTarget => _directionCalorieTarget;
 
   // ── Smart goal recommendations ─────────────────────────────────────────────
   //
@@ -772,16 +888,12 @@ class FitnessProvider extends ChangeNotifier {
   // instead of fixed defaults. Shown in Settings as suggestions the user can
   // apply with one tap.
 
-  /// Recommended daily calorie intake for ~0.5 kg/week fat loss.
-  /// = bestTdee − 500, clamped to the safe range [1200, 2800].
-  /// Prefers the data-calibrated [adaptiveTdee] so it won't recommend
-  /// overeating when the activity-factor estimate is too high.
-  /// Returns null when weight/height/age haven't been logged yet.
-  double? get recommendedCalorieGoal {
-    final t = bestTdee;
-    if (t == null) return null;
-    return (t - 500).clamp(1200.0, 2800.0);
-  }
+  /// Recommended daily calorie intake for the user's [goalDirection] — a deficit
+  /// for lose, maintenance for maintain, a lean surplus for gain (see
+  /// [_directionCalorieTarget] for the exact bands). Prefers the data-calibrated
+  /// [adaptiveTdee] so it won't over-recommend when the activity-factor estimate
+  /// is too high. Returns null when weight/height/age haven't been logged yet.
+  double? get recommendedCalorieGoal => _directionCalorieTarget;
 
   /// Recommended daily protein for fat loss + muscle retention.
   /// Uses 2.0 g/kg lean body mass when scale data is available,
@@ -850,41 +962,62 @@ class FitnessProvider extends ChangeNotifier {
     return w - _goalWeightKg;
   }
 
-  /// Estimated weeks to reach goal, based on your ACTUAL measured rate of loss.
+  /// Estimated weeks to reach goal, based on your ACTUAL measured rate of change.
   ///
-  /// Prefers the 7-day regression trend (`weeklyWeightChange`); this avoids the
-  /// old bug where today's instantaneous calorie deficit (huge early in the day,
-  /// before you've eaten) produced absurd ETAs like "2 weeks to lose 4 kg".
-  /// Falls back to a sustainable rate (a 500 kcal/day cut ≈ 0.45 kg/week) only
-  /// when there isn't enough weight history yet.
+  /// Direction-aware: a **lose** goal counts down the kg still to shed, a **gain**
+  /// goal counts up the kg still to put on, and **maintain** has no destination
+  /// (returns null). Each prefers the 7-day regression trend (`weeklyWeightChange`)
+  /// — this avoids the old bug where today's instantaneous deficit (huge early in
+  /// the day) produced absurd ETAs — and returns null when the measured trend
+  /// moves the WRONG way (losing while bulking, or gaining while cutting), since
+  /// projecting an ETA the data contradicts would be dishonest. Falls back to a
+  /// sustainable rate from the recommended deficit/surplus only when there isn't
+  /// enough weight history yet.
   double? get weeksToGoal {
-    final kg = kgToGoal;
-    if (kg == null || kg <= 0) return null;
+    final kg = kgToGoal; // +ve = above goal (must lose), −ve = below goal (must gain)
+    if (kg == null) return null;
 
-    // 1) Measured trend (most accurate) — needs ≥3 weight logs for a regression.
-    final trend = weeklyWeightChange; // kg/week, negative = losing
-    if (trend != null && trend < -0.05) {
-      return (kg / trend.abs()).clamp(1, 999);
-    }
-    // Trend clearly moving AWAY from the goal (gaining while needing to lose):
-    // an ETA would be dishonest — the sustainable-deficit fallback assumes a
-    // deficit that measurably isn't happening. Return null so the UI shows no
-    // estimate instead of a fictional one.
-    if (trend != null && trend > 0.05) return null;
+    switch (_goalDirection) {
+      case GoalDirection.maintain:
+        return null; // no destination to count down to
 
-    // 2) Sustainable projection from a 500 kcal/day deficit (0.45 kg/week).
-    //    Use bestTdee (data-calibrated when available) so this fallback agrees
-    //    with the maintenance figure surfaced everywhere else in the app.
-    final target = fatLossCalorieTarget;
-    final t = bestTdee;
-    if (target != null && t != null && t > target) {
-      final dailyDeficit = (t - target).clamp(0, 1000); // capped, realistic
-      if (dailyDeficit <= 0) return null;
-      final kgPerWeek = dailyDeficit * 7 / 7700;
-      if (kgPerWeek <= 0) return null;
-      return (kg / kgPerWeek).clamp(1, 999);
+      case GoalDirection.lose:
+        if (kg <= 0) return null; // already at/under goal
+        final trend = weeklyWeightChange; // kg/week, negative = losing
+        if (trend != null && trend < -0.05) {
+          return (kg / trend.abs()).clamp(1, 999);
+        }
+        if (trend != null && trend > 0.05) return null; // gaining while cutting
+        // Sustainable projection from the recommended deficit.
+        final target = recommendedCalorieGoal;
+        final t = bestTdee;
+        if (target != null && t != null && t > target) {
+          final dailyDeficit = (t - target).clamp(0, 1000);
+          final kgPerWeek = dailyDeficit * 7 / 7700;
+          if (kgPerWeek <= 0) return null;
+          return (kg / kgPerWeek).clamp(1, 999);
+        }
+        return null;
+
+      case GoalDirection.gain:
+        final toGain = -kg; // +ve = how much still to put on
+        if (toGain <= 0) return null; // already at/over goal
+        final trend = weeklyWeightChange; // kg/week, positive = gaining
+        if (trend != null && trend > 0.05) {
+          return (toGain / trend).clamp(1, 999);
+        }
+        if (trend != null && trend < -0.05) return null; // losing while bulking
+        // Sustainable projection from the recommended surplus.
+        final target = recommendedCalorieGoal; // maintenance + 350
+        final t = bestTdee;
+        if (target != null && t != null && target > t) {
+          final dailySurplus = (target - t).clamp(0, 1000);
+          final kgPerWeek = dailySurplus * 7 / 7700;
+          if (kgPerWeek <= 0) return null;
+          return (toGain / kgPerWeek).clamp(1, 999);
+        }
+        return null;
     }
-    return null;
   }
 
   // ── Body-composition analytics (uses ALL scale + measurement data) ──────────
@@ -1536,7 +1669,14 @@ class FitnessProvider extends ChangeNotifier {
     return counted == 0 ? null : total / counted;
   }
 
-  /// Days since the most recent workout (0 = today). Returns 999 if none ever.
+  /// True once the user has logged at least one workout. Guards the "N days
+  /// since your last workout" copy so a never-trained user never sees the
+  /// nonsensical "999 days since..." message.
+  bool get hasEverLoggedWorkout => _workoutHistory.isNotEmpty;
+
+  /// Days since the most recent workout (0 = today). Returns 999 if none ever —
+  /// callers MUST gate on [hasEverLoggedWorkout] before rendering this so the
+  /// sentinel never reaches the UI.
   int get daysSinceLastWorkout {
     if (_workoutHistory.isEmpty) return 999;
     final now = DateTime.now();
@@ -1755,6 +1895,11 @@ class FitnessProvider extends ChangeNotifier {
 
   Future<void> loadData() async {
     _oneRmCache = null; // invalidate on every reload (import, app start, etc.)
+    // Drop memoized derived caches so a reload (import, midnight, resume) never
+    // serves a value computed against the previous dataset.
+    _foodHistoryCache = null;
+    _waterHistoryCache = null;
+    _insightSnapshot = null;
     final prefs = await SharedPreferences.getInstance();
 
     // User profile
@@ -1763,6 +1908,12 @@ class FitnessProvider extends ChangeNotifier {
     _isMale = prefs.getBool('is_male') ?? true;
     _goalWeightKg = prefs.getDouble('goal_weight_kg') ?? 70.0;
     _userName = prefs.getString('user_name') ?? 'Friend';
+    // Haptic feedback preference — sync the global flag so every widget sees it.
+    _hapticsEnabled = prefs.getBool('haptics_enabled') ?? true;
+    Haptics.enabled = _hapticsEnabled;
+    // Goal direction is resolved (with one-time migration) after body/scale
+    // history loads below, since inference needs the current weight.
+    final storedGoalDir = prefs.getString('goal_direction');
     _onboardingDone = prefs.getBool('onboarding_done') ?? false;
     _aiCoachEnabled = prefs.getBool('ai_coach_enabled') ?? true;
     _aiCoachMode = prefs.getString('ai_coach_mode') == 'cloud'
@@ -1878,6 +2029,19 @@ class FitnessProvider extends ChangeNotifier {
       }
     } catch (_) { _measurementHistory = []; }
 
+    // Goal direction: honour the stored value; migrate existing users ONCE by
+    // inferring from goal weight vs current weight (body/scale history is now
+    // loaded, so latestWeightKg is available), then persist so it's stable.
+    if (storedGoalDir != null) {
+      _goalDirection = goalDirectionFromName(storedGoalDir);
+    } else {
+      _goalDirection = inferGoalDirection(
+        goalWeightKg: _goalWeightKg,
+        currentWeightKg: latestWeightKg,
+      );
+      await prefs.setString('goal_direction', _goalDirection.name);
+    }
+
     // Historical food, water, supplement — ALL stored days (no cap). Nothing is
     // ever pruned, so scan EVERY persisted daily key instead of a fixed 60-day
     // window. Today's own data lives in _todayFood/_todayWater/_supplements, so
@@ -1962,9 +2126,33 @@ class FitnessProvider extends ChangeNotifier {
   List<AppNotification> _milestones = [];
   Set<String> _seenInsightTitles = {};
 
+  // Memoized insight snapshot (C1). `unreadNotifications` → `liveInsightFeed` →
+  // `topInsights(...)` runs the whole insight engine, and the badge reads it on
+  // many rebuilds. Cache the computed insight list keyed on [_dataVersion] (any
+  // mutation) + the calendar day (time-of-day thresholds change at midnight), so
+  // rebuilds that carry no data change reuse the last result instead of
+  // re-deriving. `_populateNotifications`, the badge, and the panel all share it.
+  List<Insight>? _insightSnapshot;
+  int _insightSnapshotVersion = -1;
+  String _insightSnapshotDay = '';
+
+  List<Insight> get _liveInsights {
+    final day = _todayKey;
+    if (_insightSnapshot != null &&
+        _insightSnapshotVersion == _dataVersion &&
+        _insightSnapshotDay == day) {
+      return _insightSnapshot!;
+    }
+    final snap = topInsights(this, DateTime.now(), count: 6);
+    _insightSnapshot = snap;
+    _insightSnapshotVersion = _dataVersion;
+    _insightSnapshotDay = day;
+    return snap;
+  }
+
   /// Live AI Coach insights as feed items (deduped by category, top 6).
   List<AppNotification> get liveInsightFeed {
-    final insights = topInsights(this, DateTime.now(), count: 6);
+    final insights = _liveInsights;
     return insights
         .map((ins) => AppNotification(
               id: 'insight_${ins.category.name}',
