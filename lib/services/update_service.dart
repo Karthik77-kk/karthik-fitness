@@ -177,6 +177,20 @@ class UpdateService {
 
     if (await dest.exists()) await dest.delete();
     await part.rename(dest.path);
+
+    // Integrity gate: the finished file MUST match the size GitHub reported for
+    // the asset. A short read (connection dropped at EOF), a corrupt resume, or
+    // a tampered payload is caught here — before the APK is ever handed to the
+    // installer. On mismatch we delete it and throw so the next launch redownloads
+    // cleanly. (The app also verifies the signing cert at runtime post-install.)
+    final got = await dest.length();
+    if (total > 0 && got != total) {
+      try {
+        await dest.delete();
+      } catch (_) {}
+      throw StateError('Downloaded APK is $got bytes, expected $total');
+    }
+
     onProgress?.call(1);
     return dest;
   }
