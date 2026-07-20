@@ -507,18 +507,21 @@ jobs:
           import os
           from PIL import Image, ImageDraw, ImageFont
           def create_k_icon(size):
-              bg = (90, 90, 90, 255)
-              fg = (0, 0, 0, 255)
+              # Minimalist launcher: a single black 'K' on a flat grey square.
+              # Regular (non-bold) weight + generous padding for a clean, light
+              # look rather than the previous heavy bold glyph.
+              bg = (90, 90, 90, 255)   # flat neutral grey
+              fg = (0, 0, 0, 255)      # black
               img = Image.new('RGBA', (size, size), bg)
               draw = ImageDraw.Draw(img)
               font = None
               for fpath in [
-                  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-                  '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-                  '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+                  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+                  '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
               ]:
                   if os.path.exists(fpath):
-                      font = ImageFont.truetype(fpath, int(size * 0.62))
+                      font = ImageFont.truetype(fpath, int(size * 0.56))
                       break
               if font:
                   bbox = draw.textbbox((0, 0), 'K', font=font)
@@ -526,8 +529,10 @@ jobs:
                   th = bbox[3] - bbox[1]
                   draw.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), 'K', fill=fg, font=font)
               else:
-                  m, s = size * 0.18, max(size * 0.13, 3)
-                  cx = size * 0.46
+                  # Thin geometric fallback (rarely used — DejaVuSans is present
+                  # on the runner) that matches the minimal look.
+                  m, s = size * 0.30, max(size * 0.09, 2)
+                  cx = size * 0.44
                   draw.rectangle([m, m, m+s, size-m], fill=fg)
                   draw.polygon([(cx, size*0.5), (cx+s*0.6, size*0.5), (size-m, m), (size-m-s, m)], fill=fg)
                   draw.polygon([(cx, size*0.5), (cx+s*0.6, size*0.5), (size-m, size-m), (size-m-s, size-m)], fill=fg)
