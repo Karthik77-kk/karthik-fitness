@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # Read-only gate — it never pushes, so don't leave a usable token
@@ -118,7 +118,7 @@ jobs:
 
       - name: Set up Java
         if: steps.changed.outputs.code == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -136,7 +136,7 @@ jobs:
         # ~/.pub-cache keyed on pubspec.lock makes `flutter pub get` near-instant
         # on unchanged dependencies.
         if: steps.changed.outputs.code == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}

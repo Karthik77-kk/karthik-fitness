@@ -41,7 +41,7 @@ jobs:
       !contains(github.event.pull_request.title, '[skip auto-merge]')
     steps:
       - name: Enable native auto-merge (squash)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           # Use a fine-grained PAT (RELEASE_PAT) so the merge is attributed to a real
           # user, which lets the push to main trigger build_apk.yml. With the default

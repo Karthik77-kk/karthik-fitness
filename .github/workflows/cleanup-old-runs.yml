@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Delete old runs (keep newest 5 per workflow)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
