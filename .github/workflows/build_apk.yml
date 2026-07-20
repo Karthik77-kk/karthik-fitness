@@ -18,7 +18,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Dynamic build gate: decide at RUNTIME whether this push actually changed
+  # anything that can affect the APK. A merge that only touched docs, CI config,
+  # the website, or tests produces a functionally-identical APK — building and
+  # releasing it just prompts every user to "update" for nothing and burns ~15
+  # min of runner time. This computes the real changed-file set for the push
+  # (its before→after range) and only lets the build job run when app code moved.
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide whether to build
+        id: check
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          ZERO="0000000000000000000000000000000000000000"
+          # Manual runs, a brand-new branch, or a missing/invalid base → always
+          # build (can't compute a diff, so don't risk skipping a real change).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || \
+             [ -z "$BEFORE" ] || [ "$BEFORE" = "$ZERO" ] || \
+             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=manual/dispatch or no valid base — building" >> "$GITHUB_OUTPUT"
+          else
+            FILES=$(git diff --name-only "$BEFORE" "$AFTER")
+            echo "Changed files in this push:"; echo "$FILES"
+            # App-relevant = anything compiled/packaged into the APK, plus the
+            # build workflow itself (so a build_apk.yml change is validated).
+            if echo "$FILES" | grep -qE '^(lib/|android/|assets/|pubspec\.yaml$|pubspec\.lock$|\.github/workflows/build_apk\.yml$)'; then
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              echo "reason=app-relevant files changed — building" >> "$GITHUB_OUTPUT"
+            else
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              echo "reason=no app-relevant changes — skipping build & release" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Build gate: ${{ steps.check.outputs.build == 'true' && 'building' || 'skipped (no app changes)' }}" >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: detect
+    # Only run the full ~15-min build+release when the detect job says app code
+    # actually changed (or it was a manual dispatch).
+    if: ${{ needs.detect.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     # A cold build is ~10-15 min; 45 is generous headroom while still capping a
     # hung run well under the 6h runner default.

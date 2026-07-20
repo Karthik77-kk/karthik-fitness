@@ -478,6 +478,28 @@ Every PR is squash-merged, so the squash commit's subject line **is** the PR tit
 - Never put internal jargon in the title: no CI/workflow/keystore/tamper/signing/secrets/agent/gate/PR/repo terminology, no security-mechanism specifics, no build/rule numbers.
 - All real technical detail — the actual why/what/how — goes in the **PR description and commit body** instead. Only the subject line (`%s`) is ever extracted into release notes; the body never is.
 
+### Rule 20 — Don't rebuild/release the APK for non-app changes (dynamic build gate)
+Every push to `main` triggers `build_apk.yml`, but a merge that only touched docs, CI config, the website, or tests produces a **functionally-identical APK**. Shipping it under a new version tag makes the in-app updater prompt every user to "update" for nothing and burns ~15 min of runner time. `build_apk.yml`'s `detect` job computes the push's **real changed-file set** (`github.event.before`→`sha`) at runtime and only runs the build+release job when an *app-relevant* path moved: `lib/**`, `android/**`, `assets/**`, `pubspec.yaml`/`pubspec.lock`, or `build_apk.yml` itself. `workflow_dispatch` always forces a build.
+- ❌ Never revert this to an unconditional build.
+- ✅ Keep the decision **dynamic** (computed from the diff), never a static path list that silently drifts out of date.
+
+### Rule 21 — Toolchain/dependency bumps are reviewed, never auto-merged
+Dependabot (`.github/dependabot.yml`) opens weekly, grouped GitHub-Actions update PRs. They run through the PR Quality Gate like everything else, but `auto-merge.yml` **excludes them** (`github.actor != 'dependabot[bot]'`). Two reasons: (1) Dependabot's workflow runs get a read-only token with no access to `RELEASE_PAT`, so an auto-merge would fail anyway; (2) a toolchain bump must never auto-ship a release — it's merged by hand after a look. Do NOT enable pub/package auto-updates without the same manual-merge discipline, and never let a bump reach the user-facing changelog (the release-notes composer drops `bump`/`ci:`/`chore:`/`build(deps)` subjects — keep it that way).
+
+### Rule 22 — CI job hygiene (mandatory for EVERY workflow job)
+Every job in `.github/workflows/` MUST:
+- set **`timeout-minutes`** (a hung step otherwise burns the 6-hour runner default);
+- declare **least-privilege `permissions`** (default `contents: read`; add `write` scopes only where actually used; `persist-credentials: false` on read-only checkouts);
+- share a **`concurrency`** group wherever duplicate/overlapping runs are wasteful or unsafe (the PR gate cancels superseded runs; the release build **queues, never cancels** — losing a release is worse than waiting);
+- **cache** what's slow and deterministic — `~/.pub-cache` (keyed on `pubspec.lock`) and Gradle + `flutter_gemma` (keyed on `build_apk.yml` + `pubspec.lock`).
+Before pushing ANY workflow change: **validate the YAML locally** (`npx -y js-yaml <file>`) and confirm the gate's own guards still pass (secret scan, keystore guard, `applicationId`/`namespace` pins). Prefix CI commits/PRs `ci:` so they never leak into release notes (Rule 19).
+
+### Rule 23 — Prefer dynamic, computed checks over static config that drifts
+When a decision depends on the actual state of the repo or the change (which files moved, the last shipped release, current coverage, the commit count), **compute it at runtime** — never hardcode a literal that silently goes stale. This is why: the build gate diffs the push (Rule 20), the PR gate detects changed paths instead of a fixed skip-list, `versionCode` is derived from the commit count (Rule 16, never hand-bumped), and release notes are generated from the actual commit range. A hardcoded value that must be remembered and updated by hand is a latent CI outage.
+
+### Rule 24 — The pipeline is fast BY DESIGN: keep it that way, measure before adding work
+The gate is path-filtered (docs/config PRs skip analyze+test), fully cached, and time-boxed; the release build is gated to app-only changes. Before adding any new CI step, ask: does it run on every PR? Is it cached? Can it fail-fast or run only when relevant paths change? Put fast, high-signal checks (secret/identity guards) **before** the slow toolchain setup so failures surface in seconds. Don't add redundant work (e.g. the release build must not re-run the test suite the gate already ran). Never trade the "a broken build never ships / last-good APK stays latest" guarantee for speed.
+
 ---
 
 ## Build & Run Commands
