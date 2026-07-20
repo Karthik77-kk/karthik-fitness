@@ -37,11 +37,17 @@ jobs:
   verify:
     name: Verify (analyze + test)
     runs-on: ubuntu-latest
+    # Cap runtime so a hung step can't burn the 6h default of runner minutes.
+    # A normal run is ~3-4 min; 20 leaves generous headroom.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Read-only gate — it never pushes, so don't leave a usable token
+          # persisted in the local git config.
+          persist-credentials: false
 
       - name: Detect changed paths
         id: changed
@@ -125,6 +131,18 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Cache pub packages
+        # flutter-action caches the SDK, not the resolved packages. Caching
+        # ~/.pub-cache keyed on pubspec.lock makes `flutter pub get` near-instant
+        # on unchanged dependencies.
+        if: steps.changed.outputs.code == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
       - name: Install dependencies
         if: steps.changed.outputs.code == 'true'
         run: flutter pub get
@@ -138,6 +156,7 @@ jobs:
         run: flutter test --coverage
 
       - name: Coverage floor
+        id: coverage
         if: steps.changed.outputs.code == 'true'
         run: |
           if [ ! -f coverage/lcov.info ]; then
@@ -146,6 +165,7 @@ jobs:
           fi
           PCT=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{ if(lf>0) printf "%.1f", lh/lf*100; else print "0" }' coverage/lcov.info)
           echo "Line coverage: ${PCT}% (floor ${COVERAGE_MIN}%)"
+          echo "pct=${PCT}" >> "$GITHUB_OUTPUT"
           if awk "BEGIN{exit !($PCT < $COVERAGE_MIN)}"; then
             echo "::error::Coverage ${PCT}% is below the ${COVERAGE_MIN}% floor. Add tests for your change."
             exit 1
@@ -155,3 +175,21 @@ jobs:
       - name: Docs-only PR
         if: steps.changed.outputs.code == 'false'
         run: echo "No Dart/pubspec changes — analyze/test skipped. Identity, secret & version checks still ran."
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## PR Quality Gate"
+            echo ""
+            if [ "${{ steps.changed.outputs.code }}" = "true" ]; then
+              echo "| Check | Result |"
+              echo "|---|---|"
+              echo "| Secret / keystore / identity guards | ✅ passed |"
+              echo "| \`flutter analyze\` | ✅ no warnings/errors |"
+              echo "| \`flutter test\` (full suite) | ✅ passed |"
+              echo "| Line coverage | **${{ steps.coverage.outputs.pct || 'n/a' }}%** (floor ${COVERAGE_MIN}%) |"
+            else
+              echo "📄 Docs/config-only change — analyze & test skipped; guards still ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

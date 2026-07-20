@@ -1,0 +1,23 @@
+version: 2
+
+# Keeps the CI toolchain current automatically. Dependabot opens grouped PRs;
+# they go through the same PR Quality Gate as everything else. They are NOT
+# auto-merged (auto-merge.yml excludes dependabot) so a toolchain bump never
+# ships a surprise release — Karthik reviews and merges them deliberately.
+updates:
+  # GitHub Actions used by the workflows (checkout, setup-java, flutter-action, …)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    open-pull-requests-limit: 5
+    commit-message:
+      # "ci:" prefix is stripped from the user-facing release notes (Rule 19).
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels:
+      - "dependencies"
+      - "ci"

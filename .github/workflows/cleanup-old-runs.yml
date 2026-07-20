@@ -8,9 +8,14 @@ on:
 permissions:
   actions: write  # required to delete workflow runs
 
+concurrency:
+  group: cleanup-old-runs
+  cancel-in-progress: false
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Delete old runs (keep newest 5 per workflow)
         uses: actions/github-script@v7

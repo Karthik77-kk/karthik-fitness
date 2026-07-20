@@ -20,9 +20,14 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: cleanup-old-releases
+  cancel-in-progress: false
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
     steps:

@@ -20,6 +20,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A cold build is ~10-15 min; 45 is generous headroom while still capping a
+    # hung run well under the 6h runner default.
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
@@ -143,6 +146,7 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.cache/flutter_gemma
+            ~/.pub-cache
           key: gradle-${{ runner.os }}-${{ hashFiles('.github/workflows/build_apk.yml', 'pubspec.lock') }}
           restore-keys: |
             gradle-${{ runner.os }}-
@@ -565,8 +569,11 @@ jobs:
           fi
           # Each squash-merged PR is one commit whose subject is the PR title.
           # Strip the "Build N: " prefix and "(#NN)" suffix for a clean changelog.
+          # Drop internal/CI commits (merges, WIP, dependabot "Bump ...", and
+          # conventional ci:/chore:/build(deps) subjects) so they never leak into
+          # the user-facing "What's new" text (Rule 19).
           CHANGES=$(git log "$RANGE" --no-merges --pretty=format:'%s' \
-            | grep -viE '^(Merge|wip|fixup)' \
+            | grep -viE '^(merge|wip|fixup|bump |ci[:(]|chore[:(]|build\(deps\))' \
             | sed -E 's/^Build [0-9]+:[[:space:]]*//; s/[[:space:]]*\(#[0-9]+\)$//' \
             | sed -E 's/^/- /' \
             | head -15)
@@ -605,3 +612,17 @@ jobs:
             --latest
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk 2>/dev/null | cut -f1 || echo "?")
+          {
+            echo "## Build & Release"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Release | \`${{ steps.ver.outputs.tag }}\` (versionCode ${{ steps.ver.outputs.code }}) |"
+            echo "| APK size | ${SIZE} |"
+            echo "| Published to | [Karthik77-kk/kfit releases](https://github.com/Karthik77-kk/kfit/releases/tag/${{ steps.ver.outputs.tag }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"

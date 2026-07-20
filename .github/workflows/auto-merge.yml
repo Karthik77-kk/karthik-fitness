@@ -11,6 +11,10 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
 
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
@@ -18,13 +22,20 @@ permissions:
 jobs:
   enable-auto-merge:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Draft status is the primary guard. Title-based checks are a secondary,
     # belt-and-suspenders net for a PR that's ready-for-review but not
     # actually meant to auto-merge yet — contains()/startsWith() are case-
     # insensitive in GitHub Actions expressions, so this catches "WIP", "Wip",
     # "wip", etc. without extra logic.
+    #
+    # Dependabot is excluded on purpose: its workflow runs get a read-only token
+    # with no access to RELEASE_PAT (so the merge would fail anyway), and a
+    # toolchain bump should never auto-ship a release — Karthik merges those by
+    # hand after a look.
     if: |
       github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
       !contains(github.event.pull_request.title, 'wip') &&
       !contains(github.event.pull_request.title, 'do not merge') &&
       !contains(github.event.pull_request.title, '[skip auto-merge]')

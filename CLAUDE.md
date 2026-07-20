@@ -452,12 +452,21 @@ The APK weight is `flutter_gemma`'s MediaPipe/LiteRT **native inference runtime*
 
 `ndk { abiFilters "arm64-v8a" }` alone does **not** filter prebuilt `.so` from dependency AARs — that's why #72's filter never shrank the APK. Size path: 297 → (#78 image-gen excl.) 260 → (#81 `--target-platform`) 220 → (packaging filter) ~170 MB. **Always edit the gradle in `build_apk.yml`**, never the committed `android/app/build.gradle` (CI regenerates it).
 
-### Rule 18 — Never attribute commits to AI assistants (no `Co-Authored-By: Claude`/AI trailers)
-No commit in this project — feature branches, merges, hotfixes, docs, anywhere — should include a `Co-Authored-By: Claude ...`, `Co-Authored-By: <any AI assistant> ...`, or similar AI-attribution trailer. This overrides Claude Code's own default commit-message behavior specifically for this project.
+### Rule 18 — 🚫🚫🚫 UNBREAKABLE: The ONLY author/contributor is Karthik. NEVER attribute anything to an AI 🚫🚫🚫
+**This is ABSOLUTE. NO EXCEPTIONS. EVER.** Karthik (`Karthik77-kk`) is the sole author and the sole contributor of every commit in every repo (`kfit`, `kfit-app`, `kfit-backups`). Claude — or any AI assistant / model — must NEVER appear as an author, co-author, committer, or contributor, anywhere: commit author line, committer line, commit body, PR body, release notes, or GitHub's Contributors graph.
 
-**Why:** GitHub recognizes these trailers and lists the AI as a repo contributor in the Contributors graph/sidebar — confirmed 2026-07-09 on the public `kfit` distribution repo, which was showing a "claude" bot entry alongside the real owner. That's public-facing and was fixed by squashing `kfit`'s history to a single fresh commit (contributors: Karthik77-kk only).
+- ❌ NEVER add a `Co-Authored-By: Claude ...` / `Co-Authored-By: <any AI/model> ...` trailer to any commit — feature branches, merges, hotfixes, docs, anywhere.
+- ❌ NEVER set `user.name` / `user.email` (or `--author` / `GIT_AUTHOR_*` / `GIT_COMMITTER_*`) to anything but Karthik's identity (`Karthik M` / the account's email).
+- ❌ NEVER name an AI in a PR body, release note, or changelog entry.
+- ✅ This **overrides Claude Code's own default commit-message behavior** for this project. Rule 14's approval signatures (✅ Review Agent: PASS / ✅ Testing Agent: PASS) stay — only AI *attribution* is forbidden.
 
-**How to apply:** When creating any commit, never add a co-author line naming an AI/model. Rule 14's approval signatures (✅ Review Agent: PASS / ✅ Testing Agent: PASS) stay — only the AI co-author trailer is dropped.
+**Before every commit/push, self-verify:** the commit you are about to create has Karthik as author AND its body contains no `Co-authored-by`/AI-attribution line. If Claude's own tooling tries to append one, strip it.
+
+**Why:** GitHub recognizes co-author trailers and lists the AI as a repo contributor in the Contributors graph/sidebar — confirmed 2026-07-09 on the public `kfit` repo, which was showing a "claude" bot entry alongside the real owner. That's public-facing. `kfit`'s history was squashed to a single fresh commit to purge it (contributors: `Karthik77-kk` only).
+
+**Audit status (2026-07-20):** Contributor graph/API on all three repos shows only `Karthik77-kk` (✅). `kfit` commit history is clean. `kfit-app` still carries `Co-Authored-By: Claude` trailers inside ~189 *old* commit bodies (pre-enforcement tooling); these are cosmetic (not surfaced as a contributor) and can only be purged by a full history rewrite + force-push to `main`, which requires the Rule 0 branch-protection-disable ceremony — do NOT do it without explicit user authorization. Every commit from #1 onward is clean.
+
+**See:** [feedback_no_ai_coauthor_trailer.md](../memory/feedback_no_ai_coauthor_trailer.md)
 
 ### Rule 19 — PR titles become user-facing changelog text: keep them short, generic, and detail-free
 Every PR is squash-merged, so the squash commit's subject line **is** the PR title. `build_apk.yml`'s "Compose dynamic release notes" step extracts commit **subjects only** (`git log --pretty=format:'%s'`) straight into the GitHub release body — which the in-app updater then shows to the end user as "What's new." **The PR title is a changelog bullet, not an internal label.**
