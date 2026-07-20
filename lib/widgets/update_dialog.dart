@@ -1,28 +1,34 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/fitness_provider.dart';
 import '../services/update_service.dart';
 import 'markdown_text.dart';
 
-/// Shows a dark-themed "Update available" bottom-sheet dialog.
-/// Call [showUpdateDialog] from a Navigator context to display it.
+/// Shows a dark-themed update bottom-sheet.
+///
+/// When [readyFile] is provided the APK is already downloaded, so the sheet
+/// offers a one-tap **Install** (no download). When it's null the sheet falls
+/// back to downloading on tap (used by the manual "Check for updates" path).
 Future<void> showUpdateDialog(
   BuildContext context,
   AppUpdateInfo info,
-  UpdateService service,
-) {
+  UpdateService service, {
+  File? readyFile,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _UpdateSheet(info: info, service: service),
+    builder: (_) => _UpdateSheet(info: info, service: service, readyFile: readyFile),
   );
 }
 
 class _UpdateSheet extends StatefulWidget {
   final AppUpdateInfo info;
   final UpdateService service;
-  const _UpdateSheet({required this.info, required this.service});
+  final File? readyFile;
+  const _UpdateSheet({required this.info, required this.service, this.readyFile});
 
   @override
   State<_UpdateSheet> createState() => _UpdateSheetState();
@@ -40,9 +46,9 @@ class _UpdateSheetState extends State<_UpdateSheet> {
       _error = null;
     });
     try {
-      // Mark update as initiated so the check on next launch is suppressed for
-      // 2 hours — prevents "update available" immediately after an install.
-      await context.read<FitnessProvider>().markUpdateInitiated();
+      // Guard the brief install/reboot gap for THIS build so the same version
+      // doesn't re-prompt mid-install (a newer release still will).
+      await context.read<FitnessProvider>().markUpdateInitiated(widget.info.build);
 
       // Re-fetch the latest release right before downloading. If a newer build
       // was published between the initial check and the user tapping Update,
@@ -73,8 +79,30 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     }
   }
 
+  /// One-tap install of an already-downloaded APK (no network).
+  Future<void> _install() async {
+    setState(() {
+      _phase = _Phase.installing;
+      _error = null;
+    });
+    try {
+      await context.read<FitnessProvider>().markUpdateInitiated(widget.info.build);
+      await widget.service.install(widget.readyFile!);
+      if (mounted) Navigator.of(context).pop();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _phase = _Phase.error;
+          _error = 'Could not open the installer. Try again.';
+        });
+      }
+    }
+  }
+
   void _later() {
-    context.read<FitnessProvider>().snoozeUpdate();
+    // Keep the downloaded file so "Later" never costs a re-download — it's
+    // purged only once the user is actually on the latest version.
+    context.read<FitnessProvider>().snoozeUpdate(widget.info.build);
     Navigator.of(context).pop();
   }
 
@@ -117,7 +145,9 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                         color: Color(0xFF30D158), size: 22),
                     const SizedBox(width: 10),
                     Text(
-                      'Update available',
+                      widget.readyFile != null
+                          ? 'Update ready to install'
+                          : 'Update available',
                       style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w700,
@@ -190,7 +220,8 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                         child: _Button(
                           label: 'Retry',
                           primary: true,
-                          onPressed: _download,
+                          onPressed:
+                              widget.readyFile != null ? _install : _download,
                         ),
                       ),
                       const SizedBox(width: 10),
@@ -214,9 +245,10 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                       const SizedBox(width: 10),
                       Expanded(
                         child: _Button(
-                          label: 'Update',
+                          label: widget.readyFile != null ? 'Install' : 'Update',
                           primary: true,
-                          onPressed: _download,
+                          onPressed:
+                              widget.readyFile != null ? _install : _download,
                         ),
                       ),
                     ]),

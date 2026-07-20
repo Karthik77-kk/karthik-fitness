@@ -303,18 +303,35 @@ class FitnessProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Epoch ms until which the user has snoozed update prompts (via "Later").
+  /// Epoch ms until which the user snoozed update prompts (via "Later"), and the
+  /// release build they snoozed ON — a NEWER build than this always re-prompts,
+  /// so a genuinely new release is never hidden by an old snooze.
   int _updateSnoozedUntilMs = 0;
-  /// Epoch ms when the user last tapped "Update" — suppresses re-prompts for 2 h
-  /// so the app doesn't immediately ask for another update right after an install.
+  int _updateSnoozedBuild = 0;
+  /// Epoch ms when the user last tapped "Update", and the build they tapped it
+  /// for. This only guards the brief install/reboot gap (so the same version
+  /// doesn't re-prompt mid-install) — a short window, and only for that build.
   int _updateInitiatedAtMs = 0;
+  int _updateInitiatedBuild = 0;
 
-  /// True when the update dialog should be suppressed — either the user snoozed
-  /// it for 3 days via "Later", or they just initiated an install (2-h window).
-  bool get shouldSuppressUpdateCheck {
+  /// Short flicker-guard after tapping "Update": long enough to cover an OS
+  /// install/reboot, short enough that a stuck/cancelled install doesn't hide the
+  /// prompt for hours (the old 2-h window is why the launch popup "never showed"
+  /// once a user had ever tapped Update).
+  static const Duration _postUpdateGrace = Duration(minutes: 10);
+
+  /// Whether the launch update popup for [availableBuild] should be suppressed.
+  /// Suppression is always scoped to the build the user acted on, so a newer
+  /// release overrides both a "Later" snooze and the post-Update grace window.
+  bool shouldSuppressUpdateFor(int availableBuild) {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now < _updateSnoozedUntilMs) return true;
-    if (now - _updateInitiatedAtMs < const Duration(hours: 2).inMilliseconds) {
+    // Snoozed via "Later" — but only for the build (or older) they snoozed on.
+    if (now < _updateSnoozedUntilMs && availableBuild <= _updateSnoozedBuild) {
+      return true;
+    }
+    // Just tapped "Update" for this same build — ride out the install gap.
+    if (now - _updateInitiatedAtMs < _postUpdateGrace.inMilliseconds &&
+        availableBuild <= _updateInitiatedBuild) {
       return true;
     }
     return false;
@@ -403,20 +420,25 @@ class FitnessProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Called when the user taps "Later" — suppresses update prompts for 3 days.
-  Future<void> snoozeUpdate() async {
+  /// Called when the user taps "Later" — snoozes prompts for [build] for 3 days.
+  /// A release NEWER than [build] still prompts (see [shouldSuppressUpdateFor]).
+  Future<void> snoozeUpdate(int build) async {
     _updateSnoozedUntilMs =
         DateTime.now().add(const Duration(days: 3)).millisecondsSinceEpoch;
+    _updateSnoozedBuild = build;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('update_snoozed_until_ms', _updateSnoozedUntilMs);
+    await prefs.setInt('update_snoozed_build', _updateSnoozedBuild);
   }
 
-  /// Called when the user taps "Update" — suppresses re-prompts for 2 hours so
-  /// the app doesn't immediately ask for another update right after an install.
-  Future<void> markUpdateInitiated() async {
+  /// Called when the user taps "Update" for [build] — guards only the brief
+  /// install/reboot gap for that same build (see [_postUpdateGrace]).
+  Future<void> markUpdateInitiated(int build) async {
     _updateInitiatedAtMs = DateTime.now().millisecondsSinceEpoch;
+    _updateInitiatedBuild = build;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('update_initiated_at_ms', _updateInitiatedAtMs);
+    await prefs.setInt('update_initiated_build', _updateInitiatedBuild);
   }
 
   /// One-shot flag set when a NEW milestone (streak / goal reached) is detected,
@@ -1940,7 +1962,9 @@ class FitnessProvider extends ChangeNotifier {
     }
     _autoUpdateCheck = prefs.getBool('auto_update_check') ?? true;
     _updateSnoozedUntilMs = prefs.getInt('update_snoozed_until_ms') ?? 0;
+    _updateSnoozedBuild = prefs.getInt('update_snoozed_build') ?? 0;
     _updateInitiatedAtMs = prefs.getInt('update_initiated_at_ms') ?? 0;
+    _updateInitiatedBuild = prefs.getInt('update_initiated_build') ?? 0;
 
     // User-defined goals
     _calorieGoal = prefs.getInt('calorie_goal') ?? kDefaultCalorieGoal;

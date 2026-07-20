@@ -293,20 +293,39 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       final currentBuild = int.tryParse(pkgInfo.buildNumber) ?? 0;
       if (currentBuild == 0) return;
 
-      if (provider.shouldSuppressUpdateCheck) return;
-
       final service = UpdateService();
       final info = await service.checkForUpdate(currentBuild);
-      if (info == null) return;
+      if (info == null) {
+        // Already on the latest — purge any leftover downloaded installer.
+        await UpdateService.cleanupCachedApks();
+        return;
+      }
 
-      if (mounted) {
-        // Keep the launch greeting out of the update flow.
-        setState(() => _updateDialogVisible = true);
+      // Suppress only for the exact build the user already snoozed/started —
+      // a newer release always prompts, even mid-snooze. The downloaded file (if
+      // any) is kept so "Later" doesn't cost a re-download.
+      if (provider.shouldSuppressUpdateFor(info.build)) return;
+
+      // Auto-download in the background: if a prior download already finished,
+      // offer Install straight away; otherwise fetch (resuming any partial) and
+      // prompt once it's ready. The app stays usable throughout, and closing it
+      // mid-download just resumes on the next launch.
+      var ready = await service.readyApk(info.build, expectedBytes: info.sizeBytes);
+      if (ready == null) {
         try {
-          await showUpdateDialog(context, info, service);
-        } finally {
-          if (mounted) setState(() => _updateDialogVisible = false);
+          ready = await service.downloadApk(info);
+        } catch (_) {
+          return; // network hiccup — resumes next launch
         }
+      }
+      if (!mounted) return;
+
+      // Keep the launch greeting out of the update flow.
+      setState(() => _updateDialogVisible = true);
+      try {
+        await showUpdateDialog(context, info, service, readyFile: ready);
+      } finally {
+        if (mounted) setState(() => _updateDialogVisible = false);
       }
     } catch (_) {
       // Never crash the app on update check failure.

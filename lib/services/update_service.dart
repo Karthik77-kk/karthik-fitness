@@ -103,36 +103,81 @@ class UpdateService {
     }
   }
 
-  /// Downloads the APK from [info.apkUrl] to the temp directory, calling
-  /// [onProgress] with a 0.0–1.0 fraction as bytes arrive.
-  /// Returns the local [File] on success.
+  /// The fully-downloaded APK for [build], or null if it isn't present (or is a
+  /// wrong-sized leftover). Lets the app show an "Install" prompt without
+  /// re-downloading when a background download already finished.
+  Future<File?> readyApk(int build, {int expectedBytes = 0, Directory? dir}) async {
+    try {
+      final tmp = dir ?? await getTemporaryDirectory();
+      final f = File('${tmp.path}/kfit_$build.apk');
+      if (!await f.exists()) return null;
+      if (expectedBytes > 0 && await f.length() != expectedBytes) return null;
+      return f;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Downloads (or RESUMES) the APK for [info.build] to the temp dir, calling
+  /// [onProgress] with a 0.0–1.0 fraction as bytes arrive. Returns the completed
+  /// [File].
+  ///
+  /// Resumable: bytes land in a `kfit_<build>.apk.part` file; a re-invocation
+  /// after the app was closed mid-download sends `Range: bytes=<have>-` and
+  /// appends (falling back to a clean restart if the server ignores the range).
+  /// A fully-present file short-circuits instantly, so calling this on every
+  /// launch is cheap once the download is done. Other builds' files are purged
+  /// first so at most one APK's worth of cache exists.
   Future<File> downloadApk(
     AppUpdateInfo info, {
     void Function(double progress)? onProgress,
+    Directory? dir,
   }) async {
-    final tmp = await getTemporaryDirectory();
-    // Clear older downloaded APKs first — each is ~170 MB and they otherwise
-    // pile up in the cache across updates.
-    await cleanupCachedApks(keepBuild: info.build);
+    final tmp = dir ?? await getTemporaryDirectory();
+    await cleanupCachedApks(keepBuild: info.build, dir: tmp);
+
     final dest = File('${tmp.path}/kfit_${info.build}.apk');
+    final total = info.sizeBytes;
+    // Already fully downloaded → done.
+    if (await dest.exists() &&
+        (total <= 0 || await dest.length() == total)) {
+      onProgress?.call(1);
+      return dest;
+    }
+
+    final part = File('${tmp.path}/kfit_${info.build}.apk.part');
+    var have = (await part.exists()) ? await part.length() : 0;
+    // A complete .part just needs finalizing.
+    if (total > 0 && have >= total) {
+      if (await dest.exists()) await dest.delete();
+      await part.rename(dest.path);
+      onProgress?.call(1);
+      return dest;
+    }
 
     final request = http.Request('GET', Uri.parse(info.apkUrl));
+    if (have > 0) request.headers['Range'] = 'bytes=$have-';
     final response = await _client.send(request);
+    // 206 = server honoured the range (resume); anything else → restart clean.
+    final resuming = response.statusCode == 206 && have > 0;
+    if (!resuming) have = 0;
 
-    final total = response.contentLength ?? info.sizeBytes;
-    var received = 0;
+    final sink = part.openWrite(mode: resuming ? FileMode.append : FileMode.write);
+    var received = have;
+    try {
+      await response.stream.forEach((chunk) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0 && onProgress != null) onProgress(received / total);
+      });
+    } finally {
+      await sink.flush();
+      await sink.close();
+    }
 
-    final sink = dest.openWrite();
-    await response.stream.listen((chunk) {
-      sink.add(chunk);
-      received += chunk.length;
-      if (total > 0 && onProgress != null) {
-        onProgress(received / total);
-      }
-    }).asFuture<void>();
-    await sink.flush();
-    await sink.close();
-
+    if (await dest.exists()) await dest.delete();
+    await part.rename(dest.path);
+    onProgress?.call(1);
     return dest;
   }
 
@@ -144,22 +189,26 @@ class UpdateService {
     );
   }
 
-  /// Deletes leftover downloaded APKs (~170 MB each) from the temp dir so they
-  /// don't accumulate to gigabytes. Optionally keeps [keepBuild]'s file (the one
-  /// about to be installed). Best-effort — never throws.
+  /// Deletes leftover downloaded APKs and partials (~170 MB each) from the temp
+  /// dir so they don't accumulate. Optionally keeps [keepBuild]'s files (the
+  /// completed `kfit_<b>.apk` AND its in-flight `kfit_<b>.apk.part`). Pass no
+  /// [keepBuild] to purge everything — used once the user is on the latest
+  /// version, so a downloaded installer is never left behind. Best-effort.
   static Future<void> cleanupCachedApks({int? keepBuild, Directory? dir}) async {
     try {
       final tmp = dir ?? await getTemporaryDirectory();
-      final keepName = keepBuild != null ? 'kfit_$keepBuild.apk' : null;
+      final keepApk = keepBuild != null ? 'kfit_$keepBuild.apk' : null;
+      final keepPart = keepBuild != null ? 'kfit_$keepBuild.apk.part' : null;
       await for (final f in tmp.list(followLinks: false)) {
-        if (f is File &&
-            f.path.contains('kfit_') &&
-            f.path.endsWith('.apk') &&
-            (keepName == null || !f.path.endsWith(keepName))) {
-          try {
-            await f.delete();
-          } catch (_) {}
-        }
+        if (f is! File) continue;
+        final name = f.uri.pathSegments.last; // basename, separator-agnostic
+        final isOurs = name.startsWith('kfit_') &&
+            (name.endsWith('.apk') || name.endsWith('.apk.part'));
+        if (!isOurs) continue;
+        if (keepApk != null && (name == keepApk || name == keepPart)) continue;
+        try {
+          await f.delete();
+        } catch (_) {}
       }
     } catch (_) {/* best-effort */}
   }
