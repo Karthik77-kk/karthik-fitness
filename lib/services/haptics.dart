@@ -61,12 +61,19 @@ abstract final class Haptics {
   }
 }
 
-/// Wraps a subtree so that reaching a scroll boundary produces a single, subtle
-/// haptic tick — the "edge" feel most polished apps have. `ScrollNotification`s
+/// Wraps a subtree so scrolling *feels* textured — a light tick every ~[_tickPx]
+/// logical pixels while the finger is down (the dynamic, iOS-picker-like scroll
+/// haptic), plus a single subtle tick when a boundary is reached. `ScrollNotification`s
 /// bubble up the tree, so one of these near the app root covers *every*
-/// descendant scrollable without touching each `ListView`. The tick fires at
-/// most once per drag gesture (guarded by [_firedThisGesture]) so a long
-/// overscroll doesn't buzz continuously.
+/// descendant scrollable without touching each `ListView`.
+///
+/// Design choices that keep it feeling premium, not annoying:
+/// - Ticks only during an active drag (`dragDetails != null`); momentum flings
+///   stay silent, so the app doesn't buzz continuously after you let go.
+/// - Distance-throttled ([_tickPx]) *and* time-throttled ([_minGapMs]) so a fast
+///   flick produces a crisp cadence rather than a machine-gun rattle.
+/// - The edge tick fires at most once per gesture ([_firedThisGesture]).
+/// - Everything routes through [Haptics], so the Settings toggle silences it.
 class HapticScroll extends StatefulWidget {
   final Widget child;
   const HapticScroll({super.key, required this.child});
@@ -76,11 +83,33 @@ class HapticScroll extends StatefulWidget {
 }
 
 class _HapticScrollState extends State<HapticScroll> {
+  /// Logical pixels of drag between scroll ticks.
+  static const double _tickPx = 42;
+
+  /// Floor on the gap between ticks so a fast flick can't rattle.
+  static const int _minGapMs = 18;
+
   bool _firedThisGesture = false;
+  double _accum = 0; // px dragged since the last scroll tick
+  int _lastTickMs = 0;
 
   bool _onNotification(ScrollNotification n) {
     if (n is ScrollStartNotification) {
       _firedThisGesture = false;
+      _accum = 0;
+    } else if (n is ScrollUpdateNotification) {
+      // Only while the finger is actually dragging — not during fling inertia.
+      if (n.dragDetails != null) {
+        _accum += (n.scrollDelta ?? 0).abs();
+        if (_accum >= _tickPx) {
+          _accum = 0;
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - _lastTickMs >= _minGapMs) {
+            _lastTickMs = now;
+            Haptics.selection();
+          }
+        }
+      }
     } else if (n is OverscrollNotification && !_firedThisGesture) {
       _firedThisGesture = true;
       Haptics.edge();

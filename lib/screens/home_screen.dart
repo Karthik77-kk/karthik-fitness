@@ -2249,15 +2249,37 @@ class _DailyBriefCard extends StatelessWidget {
       ),
       border: Border.all(color: _kBlue.withValues(alpha: 0.3)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: const [
-          Text('✨', style: TextStyle(fontSize: 15)),
-          SizedBox(width: 6),
-          Text('TODAY\'S AI BRIEF',
-              style: TextStyle(
-                  color: _kSecond,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.6)),
+        Row(children: [
+          const Text('✨', style: TextStyle(fontSize: 15)),
+          const SizedBox(width: 6),
+          const Expanded(
+            child: Text('TODAY\'S AI BRIEF',
+                style: TextStyle(
+                    color: _kSecond,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6)),
+          ),
+          // Regenerate on demand — handy when today's data has moved on since
+          // the brief was written this morning. Absorbs the tap so it doesn't
+          // also open chat (the card's own onTap).
+          InkWell(
+            onTap: () {
+              Haptics.tap();
+              context.read<FitnessProvider>().forceRefreshDailyBrief();
+              ScaffoldMessenger.of(context)
+                ..clearSnackBars()
+                ..showSnackBar(const SnackBar(
+                    content: Text('Refreshing your brief…'),
+                    duration: Duration(seconds: 2)));
+            },
+            borderRadius: BorderRadius.circular(20),
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child:
+                  Icon(Icons.refresh_rounded, size: 16, color: _kSecond),
+            ),
+          ),
         ]),
         const SizedBox(height: 8),
         Text(text,

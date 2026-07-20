@@ -828,19 +828,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             future: PackageInfo.fromPlatform(),
             builder: (_, snap) {
               // Show the version exactly as the release/website tags it:
-              // v<major.minor>.<buildNumber>, where buildNumber is the CI commit
-              // count (e.g. v2.3.297). pubspec's "2.3.0" patch segment is a
-              // placeholder — the real running build is the commit count.
+              // v<major.minor>.<buildNumber>, where major.minor comes from the
+              // compiled version name and buildNumber is the CI commit count
+              // (dynamic) — e.g. "v3.0.319". pubspec's "3.0.0" patch segment is
+              // a placeholder; the real running build is the commit count.
+              // The rare PackageInfo-null fallback uses the same style from
+              // app_info so the format never changes between the two paths.
               final info = snap.data;
-              String label;
-              if (info != null) {
-                final v = info.version; // e.g. "2.3.0"
-                final mm =
-                    v.contains('.') ? v.substring(0, v.lastIndexOf('.')) : v;
-                label = 'v$mm.${info.buildNumber}'; // "v2.3.297"
-              } else {
-                label = kAppVersionLabel;
-              }
+              String vMajorMinor(String v) =>
+                  v.contains('.') ? v.substring(0, v.lastIndexOf('.')) : v;
+              final String label = info != null
+                  ? 'v${vMajorMinor(info.version)}.${info.buildNumber}'
+                  : 'v${vMajorMinor(kAppVersionName)}.$kAppBuild';
               return _Tile(
                 icon: Icons.info_outline,
                 title: 'K Fitness',

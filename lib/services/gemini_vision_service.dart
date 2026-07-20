@@ -128,6 +128,10 @@ NAMING:
 - Ignore plates, cutlery, napkins, and inedible garnish.
 
 "confidence": 0.0-1.0 for how sure you are of the identification + portion.
+
+CONSISTENCY: be deterministic — the same photo must always produce the same
+items, portions and macros. Commit to your single best estimate; don't hedge or
+randomise between plausible values.
 If there is no food in the image, return an empty array.
 
 Output ONLY a JSON array — no prose, no markdown fences.
@@ -158,7 +162,12 @@ Schema: [{"name":string,"grams":number,"kcal":number,"protein_g":number,"carb_g"
         }
       ],
       'generationConfig': {
-        'temperature': 0.2,
+        // temperature 0 + a fixed seed make the model greedy and reproducible,
+        // so the SAME photo returns the SAME foods/portions/macros every time.
+        // (At 0.2 with no seed the estimate drifted run-to-run — the "same pic,
+        // different numbers each time" bug.)
+        'temperature': 0.0,
+        'seed': 7,
         'response_mime_type': 'application/json',
       },
     });

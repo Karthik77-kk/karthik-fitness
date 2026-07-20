@@ -611,27 +611,42 @@ jobs:
         id: notes
         run: |
           set -e
-          # Previous release tag (this run's release doesn't exist yet, so
-          # `gh release view` returns the most recent prior release). Releases
-          # are published to the public kfit repo, not this (private) source repo.
-          PREV=$(gh release view --repo Karthik77-kk/kfit --json tagName -q .tagName 2>/dev/null || true)
-          echo "Previous release: ${PREV:-<none>}"
-          if [ -n "$PREV" ] && git merge-base --is-ancestor "$PREV" HEAD 2>/dev/null; then
-            RANGE="${PREV}..HEAD"
+          # What's-new must list ONLY the commits THIS push adds — not a rolling
+          # window of history. The previous fix compared against the latest
+          # release tag, but releases live in the public kfit repo while this is
+          # the private source repo (unrelated histories), so `PREV..HEAD` never
+          # resolved and it silently fell back to HEAD~10 — dumping the last ten
+          # commits' subjects into every release's changelog (the "why is it
+          # showing all the old features" bug).
+          #
+          # `github.event.before` is main's tip immediately before this push, so
+          # `before..HEAD` is exactly the newly-merged commit(s) (usually a single
+          # squash commit = the PR title). Fall back to just HEAD~1 for manual /
+          # first-push runs where `before` is absent or the zero-SHA.
+          BEFORE_SHA="${{ github.event.before }}"
+          ZERO="0000000000000000000000000000000000000000"
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$ZERO" ] \
+             && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            RANGE="${BEFORE_SHA}..HEAD"
           else
-            RANGE="HEAD~10..HEAD"
+            RANGE="HEAD~1..HEAD"
           fi
+          echo "Changelog range: ${RANGE}"
           # Each squash-merged PR is one commit whose subject is the PR title.
           # Strip the "Build N: " prefix and "(#NN)" suffix for a clean changelog.
-          # Drop internal/CI commits (merges, WIP, dependabot "Bump ...", and
-          # conventional ci:/chore:/build(deps) subjects) so they never leak into
-          # the user-facing "What's new" text (Rule 19).
+          # Then drop internal/CI/docs/test commits so engineering-only work never
+          # leaks into the user-facing "What's new" text (Rule 19): conventional
+          # prefixes (ci/chore/docs/test/refactor/build/style/perf), merge/wip,
+          # dependabot bumps, and subjects that are plainly about the repo/CI
+          # rather than the app (release cleanup, workflows, governance, etc.).
           CHANGES=$(git log "$RANGE" --no-merges --pretty=format:'%s' \
-            | grep -viE '^(merge|wip|fixup|bump |ci[:(]|chore[:(]|build\(deps\))' \
             | sed -E 's/^Build [0-9]+:[[:space:]]*//; s/[[:space:]]*\(#[0-9]+\)$//' \
+            | grep -viE '^(merge|wip|fixup|revert |bump )' \
+            | grep -viE '^(ci|chore|docs|test|refactor|build|style|perf)[:(]' \
+            | grep -viE '(release cleanup|weekly release|co-?author|branch protection|quality gate|governance|pipeline|workflow|keystore|dual-approval|harden|rule [0-9]+)' \
             | sed -E 's/^/- /' \
-            | head -15)
-          [ -z "$CHANGES" ] && CHANGES="- Maintenance and improvements"
+            | head -12)
+          [ -z "$CHANGES" ] && CHANGES="- Under-the-hood improvements"
           # Actual APK size (dynamic — no more hardcoded ~295 MB).
           BYTES=$(stat -c%s build/app/outputs/flutter-apk/kfit.apk)
           MB=$(awk -v b="$BYTES" 'BEGIN{printf "%.0f", b/1048576}')

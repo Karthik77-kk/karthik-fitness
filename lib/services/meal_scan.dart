@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,6 +12,16 @@ import 'scan_quota.dart';
 /// SharedPreferences flag: the user has agreed (once) to send meal photos to
 /// the cloud vision provider for analysis. Gates [startMealScan].
 const String _kPhotoConsentKey = 'meal_scan_photo_consent';
+
+/// SharedPreferences flag set while the camera is open for a scan. If Android
+/// destroys our Activity under memory pressure while the camera is foregrounded
+/// (common on mid-range phones, or with "Don't keep activities" on), the picked
+/// photo is delivered to a freshly recreated Activity and the original
+/// `pickImage` await never completes — the scan silently dies and the user lands
+/// back on Home. This marker lets [recoverLostMealScan] retrieve that lost photo
+/// on resume and finish the scan. It's the only reason "take a pic → nothing
+/// happens → works the second time" occurs.
+const String _kPendingScanKey = 'meal_scan_pending';
 
 /// "Scan meal" entry point used by both buttons on the Food page.
 /// Flow: quota check → one-time privacy consent → camera capture → Gemini
@@ -34,6 +46,9 @@ Future<void> startMealScan(BuildContext context) async {
 
   Haptics.tap();
   XFile? shot;
+  // Mark a scan in flight so a low-memory Activity kill while the camera is open
+  // is recoverable on resume (see [_kPendingScanKey] / [recoverLostMealScan]).
+  await prefs.setBool(_kPendingScanKey, true);
   try {
     shot = await ImagePicker().pickImage(
       source: ImageSource.camera,
@@ -41,14 +56,49 @@ Future<void> startMealScan(BuildContext context) async {
       maxWidth: 1280,
     );
   } catch (_) {
+    await prefs.setBool(_kPendingScanKey, false);
     if (context.mounted) _snack(context, "Couldn't open the camera.");
     return;
   }
+  // We got here => our Activity survived the camera; nothing to recover later.
+  await prefs.setBool(_kPendingScanKey, false);
   if (shot == null) return; // cancelled
 
   final bytes = await shot.readAsBytes();
   if (!context.mounted) return;
+  await _analyzeAndShow(context, bytes, prefs);
+}
 
+/// Recovers a meal photo captured while Android had destroyed our Activity
+/// (low-memory kill with the camera foregrounded), then finishes the scan as if
+/// the pick had returned normally. Call on app resume; it no-ops unless a scan
+/// was actually in flight, so it's cheap to call every resume.
+Future<void> recoverLostMealScan(BuildContext context) async {
+  if (!GeminiVisionService.isConfigured) return;
+  final prefs = await SharedPreferences.getInstance();
+  if (!(prefs.getBool(_kPendingScanKey) ?? false)) return;
+  // Consume the marker up-front so a second resume can't double-trigger.
+  await prefs.setBool(_kPendingScanKey, false);
+
+  final LostDataResponse resp;
+  try {
+    resp = await ImagePicker().retrieveLostData();
+  } catch (_) {
+    return; // platform without lost-data support, or nothing pending
+  }
+  final file = resp.file;
+  if (file == null) return; // user cancelled the camera, or nothing to recover
+
+  final bytes = await file.readAsBytes();
+  if (!context.mounted) return;
+  await _analyzeAndShow(context, bytes, prefs);
+}
+
+/// Shared tail of the scan pipeline: upload [bytes] to the vision service, show
+/// the progress dialog, then open the editable results (or a helpful snack).
+/// Used by both the normal pick and the lost-data recovery path.
+Future<void> _analyzeAndShow(
+    BuildContext context, Uint8List bytes, SharedPreferences prefs) async {
   showDialog(
     context: context,
     barrierDismissible: false,

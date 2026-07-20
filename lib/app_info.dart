@@ -6,8 +6,8 @@
 /// again (the old hardcoded "Build 82" lagged pubspec by 20+ builds).
 library;
 
-const String kAppVersionName = '2.3.0';
+const String kAppVersionName = '3.0.0';
 const int kAppBuild = 111;
 
-/// e.g. "v2.3.0 · Build 111"
+/// e.g. "v3.0.0 · Build 111"
 const String kAppVersionLabel = 'v$kAppVersionName · Build $kAppBuild';

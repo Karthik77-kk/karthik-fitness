@@ -101,4 +101,24 @@ void main() {
     await t.pumpAndSettle();
     expect(p.todayFood.length, 2);
   });
+
+  testWidgets('portion chip rescales grams and macros from the AI estimate',
+      (t) async {
+    final p = FitnessProvider();
+    await _openResults(t, p, sample);
+
+    // Dosa starts at the AI's 120 g / 168 kcal, so "1×" is the selected chip.
+    expect(find.text('120'), findsOneWidget);
+    expect(find.text('168'), findsOneWidget);
+
+    // Tap "2×" on the first row → 120 g doubles to 240 g and macros scale with
+    // it (168 → 336 kcal). This is the one-tap depth/quantity correction.
+    await t.tap(find.text('2×').first);
+    await t.pumpAndSettle();
+    expect(find.text('240'), findsOneWidget); // grams doubled
+    expect(find.text('336'), findsOneWidget); // kcal doubled
+
+    // Sambar (second row) is untouched.
+    expect(find.text('100'), findsOneWidget);
+  });
 }

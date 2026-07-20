@@ -367,6 +367,16 @@ class FitnessProvider extends ChangeNotifier {
     return _dailyBrief;
   }
 
+  /// Forces a fresh daily brief now, ignoring the once-a-day cache — backs the
+  /// manual "refresh" tap on the Home brief card. No-op when cloud AI isn't
+  /// configured or the coach is off.
+  Future<void> forceRefreshDailyBrief() async {
+    if (!GeminiTextService.isConfigured || !_aiCoachEnabled) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('ai_brief_date'); // invalidate today's cache
+    await refreshDailyBriefIfDue();
+  }
+
   String _dailyBriefSystemPrompt() =>
       "You are $_userName's concise personal fitness coach (Indian context). "
       'Write a short, friendly daily brief of 2-3 sentences (max ~45 words). '
@@ -377,9 +387,14 @@ class FitnessProvider extends ChangeNotifier {
   String _dailyBriefUserPrompt() =>
       'Today so far — calories ${todayCalories.round()}/$calorieGoal kcal, '
       'protein ${todayProtein.round()}/$proteinGoal g, '
-      'water $todayWaterMl/$waterGoalMl ml, steps $todaySteps/$stepGoal, '
-      'latest weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"}kg, '
-      'goal weight ${goalWeightKg.toStringAsFixed(0)}kg. Write my daily brief.';
+      'water $todayWaterMl/$waterGoalMl ml, steps $todaySteps/$stepGoal. '
+      'Yesterday — calories ${yesterdayCal.round()} kcal, '
+      'protein ${yesterdayProtein.round()} g. '
+      'Calorie-deficit streak: $deficitStreak day(s). '
+      'Latest weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"}kg, '
+      'goal weight ${goalWeightKg.toStringAsFixed(0)}kg. '
+      'Acknowledge yesterday or the streak if notable, then give me today\'s '
+      'one nudge.';
 
   Future<void> saveAutoUpdateCheck(bool value) async {
     _autoUpdateCheck = value;

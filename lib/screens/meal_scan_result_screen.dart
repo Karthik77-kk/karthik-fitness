@@ -26,6 +26,12 @@ class _EditRow {
   /// scales macros from this via [rescaleScannedFood].
   ScannedFood base;
 
+  /// The AI's original portion estimate (grams), frozen at construction. Backs
+  /// the quick portion chips (½× … 2×) so the user can correct the one thing a
+  /// flat photo can't reveal — depth/quantity — in one tap. 0 when the AI gave
+  /// no weight, in which case the chips are hidden.
+  final double originGrams;
+
   final TextEditingController name;
   final TextEditingController grams;
   final TextEditingController kcal;
@@ -36,6 +42,7 @@ class _EditRow {
 
   _EditRow(ScannedFood f)
       : base = f,
+        originGrams = f.grams,
         name = TextEditingController(text: f.name),
         grams = TextEditingController(
             text: f.grams > 0 ? f.grams.round().toString() : ''),
@@ -57,6 +64,13 @@ class _EditRow {
     protein.text = scaled.protein.round().toString();
     carbs.text = scaled.carbs.round().toString();
     fat.text = scaled.fat.round().toString();
+  }
+
+  /// Set the portion to [grams] and rescale macros to match. Used by the quick
+  /// portion chips.
+  void setGrams(double grams) {
+    this.grams.text = grams.round().toString();
+    applyGrams();
   }
 
   /// Replace name + macros from a picked food, and re-baseline so later grams
@@ -326,44 +340,98 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
   Widget _gramsField(_EditRow r) {
     return Padding(
       padding: const EdgeInsets.only(right: 8),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.scale_outlined, size: 15, color: AppColors.muted),
-          const SizedBox(width: 6),
-          const Text('Portion',
-              style: TextStyle(
-                  fontSize: 12,
-                  color: AppColors.muted,
-                  fontWeight: FontWeight.w600)),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 78,
-            child: TextField(
-              controller: r.grams,
-              keyboardType: TextInputType.number,
-              inputFormatters: positiveIntInput,
-              onChanged: (_) => setState(() => r.applyGrams()),
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 14),
-              decoration: InputDecoration(
-                isDense: true,
-                filled: true,
-                fillColor: Colors.white.withValues(alpha: 0.05),
-                hintText: '—',
-                hintStyle: const TextStyle(color: AppColors.muted),
-                border: OutlineInputBorder(
-                    borderRadius: AppRadii.rSm, borderSide: BorderSide.none),
-                contentPadding: const EdgeInsets.symmetric(vertical: 9),
+          Row(
+            children: [
+              const Icon(Icons.scale_outlined, size: 15, color: AppColors.muted),
+              const SizedBox(width: 6),
+              const Text('Portion',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: AppColors.muted,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 78,
+                child: TextField(
+                  controller: r.grams,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: positiveIntInput,
+                  onChanged: (_) => setState(() => r.applyGrams()),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.05),
+                    hintText: '—',
+                    hintStyle: const TextStyle(color: AppColors.muted),
+                    border: OutlineInputBorder(
+                        borderRadius: AppRadii.rSm, borderSide: BorderSide.none),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 6),
+              const Text('g',
+                  style: TextStyle(color: AppColors.muted, fontSize: 13)),
+            ],
           ),
-          const SizedBox(width: 6),
-          const Text('g',
-              style: TextStyle(color: AppColors.muted, fontSize: 13)),
+          // Quick portion correction — the photo can't reveal depth, so let the
+          // user say "actually I had 1½× that" in one tap. Scales from the AI's
+          // original estimate. Hidden when the AI gave no weight to scale from.
+          if (r.originGrams > 0) _portionChips(r),
         ],
+      ),
+    );
+  }
+
+  Widget _portionChips(_EditRow r) {
+    const factors = <(double, String)>[
+      (0.5, '½×'),
+      (0.75, '¾×'),
+      (1.0, '1×'),
+      (1.5, '1½×'),
+      (2.0, '2×'),
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Wrap(
+        spacing: 6,
+        children: factors.map((e) {
+          final target = (r.originGrams * e.$1).roundToDouble();
+          final selected = r.gramsValue.round() == target.round();
+          return GestureDetector(
+            onTap: () {
+              Haptics.selection();
+              setState(() => r.setGrams(target));
+            },
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+              decoration: BoxDecoration(
+                color: selected
+                    ? AppColors.green.withValues(alpha: 0.18)
+                    : Colors.white.withValues(alpha: 0.05),
+                borderRadius: AppRadii.rSm,
+                border: Border.all(
+                    color: selected
+                        ? AppColors.green
+                        : Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Text(e.$2,
+                  style: TextStyle(
+                      color: selected ? AppColors.green : AppColors.muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+            ),
+          );
+        }).toList(),
       ),
     );
   }

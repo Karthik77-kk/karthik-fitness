@@ -11,6 +11,7 @@ import 'providers/fitness_provider.dart';
 import 'services/cloud_backup_service.dart';
 import 'services/food_repository.dart';
 import 'services/haptics.dart';
+import 'services/meal_scan.dart';
 import 'services/nav_router.dart';
 import 'services/on_device_ai_service.dart';
 import 'services/update_service.dart';
@@ -345,6 +346,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
     if (state == AppLifecycleState.resumed && mounted) {
       final provider = context.read<FitnessProvider>();
       if (provider.dateChanged) provider.loadData();
+      // Recover a meal photo captured if Android killed us while the camera was
+      // open (low-memory). No-op unless a scan was actually in flight — fixes
+      // "take a pic, nothing happens, works the second time".
+      recoverLostMealScan(context);
     }
   }
 
