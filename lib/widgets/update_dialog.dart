@@ -5,70 +5,81 @@ import '../providers/fitness_provider.dart';
 import '../services/update_service.dart';
 import 'markdown_text.dart';
 
-/// Shows a dark-themed update bottom-sheet.
+/// Dark-themed update bottom-sheet.
 ///
-/// When [readyFile] is provided the APK is already downloaded, so the sheet
-/// offers a one-tap **Install** (no download). When it's null the sheet falls
-/// back to downloading on tap (used by the manual "Check for updates" path).
+/// Shows the update straight away and **downloads visibly**: if the APK is
+/// already downloaded it offers a one-tap Install; otherwise it starts the
+/// download immediately with a live progress bar (resuming any partial), then
+/// switches to Install when it's ready. "Later" keeps the downloaded file.
 Future<void> showUpdateDialog(
   BuildContext context,
   AppUpdateInfo info,
-  UpdateService service, {
-  File? readyFile,
-}) {
+  UpdateService service,
+) {
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _UpdateSheet(info: info, service: service, readyFile: readyFile),
+    isDismissible: true,
+    builder: (_) => _UpdateSheet(info: info, service: service),
   );
 }
 
 class _UpdateSheet extends StatefulWidget {
   final AppUpdateInfo info;
   final UpdateService service;
-  final File? readyFile;
-  const _UpdateSheet({required this.info, required this.service, this.readyFile});
+  const _UpdateSheet({required this.info, required this.service});
 
   @override
   State<_UpdateSheet> createState() => _UpdateSheetState();
 }
 
 class _UpdateSheetState extends State<_UpdateSheet> {
-  _Phase _phase = _Phase.idle;
+  _Phase _phase = _Phase.preparing;
   double _progress = 0;
   String? _error;
+  File? _file;
 
-  Future<void> _download() async {
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
+
+  /// Offer Install if the APK is already downloaded; otherwise start the
+  /// download right away so the user always sees *something* happening.
+  Future<void> _prepare() async {
+    final ready = await widget.service
+        .readyApk(widget.info.build, expectedBytes: widget.info.sizeBytes);
+    if (!mounted) return;
+    if (ready != null) {
+      setState(() {
+        _file = ready;
+        _phase = _Phase.ready;
+      });
+    } else {
+      _startDownload();
+    }
+  }
+
+  Future<void> _startDownload() async {
     setState(() {
       _phase = _Phase.downloading;
       _progress = 0;
       _error = null;
     });
     try {
-      // Guard the brief install/reboot gap for THIS build so the same version
-      // doesn't re-prompt mid-install (a newer release still will).
-      await context.read<FitnessProvider>().markUpdateInitiated(widget.info.build);
-
-      // Re-fetch the latest release right before downloading. If a newer build
-      // was published between the initial check and the user tapping Update,
-      // this ensures we download the TRUE latest rather than latest-1.
-      final freshInfo = await widget.service.fetchLatestInfo();
-      final infoToDownload =
-          (freshInfo != null && freshInfo.build >= widget.info.build)
-              ? freshInfo
-              : widget.info;
-
       final file = await widget.service.downloadApk(
-        infoToDownload,
+        widget.info,
         onProgress: (p) {
           if (mounted) setState(() => _progress = p);
         },
       );
       if (!mounted) return;
-      setState(() => _phase = _Phase.installing);
-      await widget.service.install(file);
-      if (mounted) Navigator.of(context).pop();
+      setState(() {
+        _file = file;
+        _phase = _Phase.ready;
+      });
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -79,15 +90,15 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     }
   }
 
-  /// One-tap install of an already-downloaded APK (no network).
   Future<void> _install() async {
-    setState(() {
-      _phase = _Phase.installing;
-      _error = null;
-    });
+    final file = _file;
+    if (file == null) return;
+    setState(() => _phase = _Phase.installing);
     try {
+      // Guard the brief install/reboot gap for THIS build so the same version
+      // doesn't re-prompt mid-install (a newer release still will).
       await context.read<FitnessProvider>().markUpdateInitiated(widget.info.build);
-      await widget.service.install(widget.readyFile!);
+      await widget.service.install(file);
       if (mounted) Navigator.of(context).pop();
     } catch (_) {
       if (mounted) {
@@ -100,8 +111,8 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   }
 
   void _later() {
-    // Keep the downloaded file so "Later" never costs a re-download — it's
-    // purged only once the user is actually on the latest version.
+    // Keep the downloaded (or downloading) file so installing later costs no
+    // re-download — it's purged only once the user is on the latest version.
     context.read<FitnessProvider>().snoozeUpdate(widget.info.build);
     Navigator.of(context).pop();
   }
@@ -109,7 +120,7 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   @override
   Widget build(BuildContext context) {
     final sizeMb = widget.info.sizeBytes > 0
-        ? '${(widget.info.sizeBytes / 1048576).toStringAsFixed(1)} MB'
+        ? '${(widget.info.sizeBytes / 1048576).toStringAsFixed(0)} MB'
         : '';
 
     return SafeArea(
@@ -123,7 +134,6 @@ class _UpdateSheetState extends State<_UpdateSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Handle
             Center(
               child: Container(
                 margin: const EdgeInsets.only(top: 12, bottom: 8),
@@ -144,14 +154,16 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                     const Icon(Icons.system_update_rounded,
                         color: Color(0xFF30D158), size: 22),
                     const SizedBox(width: 10),
-                    Text(
-                      widget.readyFile != null
-                          ? 'Update ready to install'
-                          : 'Update available',
-                      style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white),
+                    Expanded(
+                      child: Text(
+                        _phase == _Phase.ready || _phase == _Phase.installing
+                            ? 'Update ready to install'
+                            : 'Update available',
+                        style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white),
+                      ),
                     ),
                   ]),
                   const SizedBox(height: 6),
@@ -179,7 +191,7 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                             fontWeight: FontWeight.w600)),
                     const SizedBox(height: 6),
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 200),
+                      constraints: const BoxConstraints(maxHeight: 180),
                       child: SingleChildScrollView(
                         child: MarkdownText(
                           widget.info.notes,
@@ -190,69 +202,7 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                     ),
                   ],
                   const SizedBox(height: 20),
-                  if (_phase == _Phase.downloading || _phase == _Phase.installing) ...[
-                    LinearProgressIndicator(
-                      value: _phase == _Phase.installing ? 1 : _progress,
-                      backgroundColor: const Color(0xFF2C2C2E),
-                      valueColor:
-                          const AlwaysStoppedAnimation<Color>(Color(0xFF30D158)),
-                      minHeight: 6,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _phase == _Phase.installing
-                          ? 'Installing…'
-                          : _progress > 0
-                              ? '${(_progress * 100).toInt()}%'
-                              : 'Starting download…',
-                      style: const TextStyle(
-                          color: Color(0xFF8E8E93), fontSize: 12),
-                    ),
-                    const SizedBox(height: 16),
-                  ] else if (_phase == _Phase.error) ...[
-                    Text(_error ?? '',
-                        style: const TextStyle(
-                            color: Color(0xFFFF453A), fontSize: 13)),
-                    const SizedBox(height: 12),
-                    Row(children: [
-                      Expanded(
-                        child: _Button(
-                          label: 'Retry',
-                          primary: true,
-                          onPressed:
-                              widget.readyFile != null ? _install : _download,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _Button(
-                          label: 'Later',
-                          primary: false,
-                          onPressed: _later,
-                        ),
-                      ),
-                    ]),
-                  ] else ...[
-                    Row(children: [
-                      Expanded(
-                        child: _Button(
-                          label: 'Later',
-                          primary: false,
-                          onPressed: _later,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _Button(
-                          label: widget.readyFile != null ? 'Install' : 'Update',
-                          primary: true,
-                          onPressed:
-                              widget.readyFile != null ? _install : _download,
-                        ),
-                      ),
-                    ]),
-                  ],
+                  ..._phaseUI(),
                   const SizedBox(height: 8),
                 ],
               ),
@@ -262,9 +212,86 @@ class _UpdateSheetState extends State<_UpdateSheet> {
       ),
     );
   }
+
+  List<Widget> _phaseUI() {
+    switch (_phase) {
+      case _Phase.preparing:
+      case _Phase.downloading:
+        final pct = (_progress * 100).clamp(0, 100).toInt();
+        return [
+          LinearProgressIndicator(
+            value: _phase == _Phase.downloading && _progress > 0 ? _progress : null,
+            backgroundColor: const Color(0xFF2C2C2E),
+            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF30D158)),
+            minHeight: 6,
+            borderRadius: BorderRadius.circular(2),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _phase == _Phase.preparing
+                ? 'Preparing…'
+                : _progress > 0
+                    ? 'Downloading in the background… $pct%'
+                    : 'Starting download…',
+            style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          // Let the user dismiss while it keeps downloading (resumes next time).
+          SizedBox(
+            width: double.infinity,
+            child: _Button(label: 'Later', primary: false, onPressed: _later),
+          ),
+        ];
+      case _Phase.installing:
+        return const [
+          LinearProgressIndicator(
+            value: 1,
+            backgroundColor: Color(0xFF2C2C2E),
+            valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF30D158)),
+            minHeight: 6,
+          ),
+          SizedBox(height: 8),
+          Text('Opening installer…',
+              style: TextStyle(color: Color(0xFF8E8E93), fontSize: 12)),
+          SizedBox(height: 16),
+        ];
+      case _Phase.error:
+        return [
+          Text(_error ?? '',
+              style: const TextStyle(color: Color(0xFFFF453A), fontSize: 13)),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(
+              child: _Button(
+                label: 'Retry',
+                primary: true,
+                onPressed: _file != null ? _install : _startDownload,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _Button(label: 'Later', primary: false, onPressed: _later),
+            ),
+          ]),
+        ];
+      case _Phase.ready:
+        return [
+          Row(children: [
+            Expanded(
+              child: _Button(label: 'Later', primary: false, onPressed: _later),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child:
+                  _Button(label: 'Install now', primary: true, onPressed: _install),
+            ),
+          ]),
+        ];
+    }
+  }
 }
 
-enum _Phase { idle, downloading, installing, error }
+enum _Phase { preparing, downloading, ready, installing, error }
 
 class _Button extends StatelessWidget {
   final String label;
