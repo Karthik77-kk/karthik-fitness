@@ -645,6 +645,105 @@ jobs:
             echo "_lib/**/*.so = native runtime (flutter_gemma MediaPipe/LiteRT + Flutter). The Gemma model is downloaded at runtime, not bundled._"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Generate delta patch from previous release (best-effort, never fatal)
+        id: patch
+        # DELTA UPDATE — Phase 1 (inert). The ~170 MB APK is mostly a byte-identical
+        # native AI runtime; only the compiled Dart (libapp.so, a few MB) changes
+        # between builds. So a binary patch from the PREVIOUS release's kfit.apk to
+        # this one is tiny (~MBs). We publish it as an extra release asset so a
+        # one-build-behind user can later update by downloading the patch instead of
+        # the whole APK. The app IGNORES these assets until the delta-updater ships —
+        # this step only produces artifacts, it changes nothing for current installs.
+        #
+        # Best-effort by design: ANY failure here — no previous release, no kfit.apk
+        # on it, bsdiff OOM/timeout, unparseable tag — just means "no patch this
+        # release"; the full kfit.apk is always published regardless. `set +e` +
+        # explicit `exit 0` keep the step green on every skip path; continue-on-error
+        # is a second net so a patch problem can NEVER fail or block the release.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+          NEW_TAG: ${{ steps.ver.outputs.tag }}
+          NEW_BUILD: ${{ steps.ver.outputs.code }}
+        run: |
+          set +e
+          OUT=build/app/outputs/flutter-apk
+          APK="$OUT/kfit.apk"
+          WORK=build/patchwork
+          mkdir -p "$WORK"
+
+          # N-1 = whatever release is currently "latest": the new one isn't created
+          # yet (this runs before "Create GitHub Release"), and build-and-release is a
+          # serialized concurrency group, so there is no race on "latest".
+          PREV_TAG=$(gh release view --repo Karthik77-kk/kfit --json tagName --jq .tagName 2>/dev/null)
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous release — skipping patch (nothing to diff against)."; exit 0
+          fi
+          echo "Delta: previous $PREV_TAG -> new $NEW_TAG"
+
+          if ! gh release download "$PREV_TAG" --repo Karthik77-kk/kfit \
+                 -p 'kfit.apk' -D "$WORK" --clobber 2>/dev/null; then
+            echo "Previous release $PREV_TAG has no kfit.apk asset — skipping patch."; exit 0
+          fi
+          PREV="$WORK/kfit.apk"
+
+          # bsdiff on ~170 MB wants a few GB RAM + a couple minutes (suffix sort);
+          # ubuntu-latest (16 GB) fits it. timeout-box so a pathological input can't
+          # hang the release build (the 45-min job cap is a blunter backstop).
+          sudo apt-get update -qq >/dev/null 2>&1
+          if ! sudo apt-get install -y -qq bsdiff >/dev/null 2>&1; then
+            echo "bsdiff unavailable — skipping patch."; exit 0
+          fi
+          if ! timeout 600 bsdiff "$PREV" "$APK" "$WORK/kfit.patch"; then
+            echo "bsdiff failed or timed out — skipping patch."; rm -f "$WORK/kfit.patch"; exit 0
+          fi
+
+          FULL_BYTES=$(stat -c%s "$APK")
+          PATCH_BYTES=$(stat -c%s "$WORK/kfit.patch")
+          # Guard (computed per-release): if the native libs shifted this build (a
+          # Flutter/flutter_gemma bump), the patch approaches full size and saves
+          # nothing — drop it so the app just does a normal full download.
+          if [ "$PATCH_BYTES" -ge $(( FULL_BYTES * 60 / 100 )) ]; then
+            echo "Patch ${PATCH_BYTES}B >= 60% of full ${FULL_BYTES}B — not worth it, skipping."; exit 0
+          fi
+
+          # build number = last dotted segment of the tag (v3.0.325 -> 325). Bail if
+          # it isn't a clean integer so we never write a malformed patch.json.
+          FROM_BUILD=$(printf '%s' "$PREV_TAG" | awk -F. '{print $NF}')
+          if ! printf '%s' "$FROM_BUILD" | grep -qE '^[0-9]+$'; then
+            echo "Could not parse a build number from tag '$PREV_TAG' — skipping patch."; exit 0
+          fi
+
+          FROM_SHA=$(sha256sum "$PREV"             | cut -d' ' -f1)
+          TO_SHA=$(sha256sum "$APK"                | cut -d' ' -f1)
+          PATCH_SHA=$(sha256sum "$WORK/kfit.patch" | cut -d' ' -f1)
+
+          cp "$WORK/kfit.patch" "$OUT/kfit.patch"
+          # patch.json drives the app's two SHA-256 gates: it verifies the installed
+          # APK == fromSha256 before patching, and the reconstructed APK == toSha256
+          # before installing. jq (not a heredoc) avoids YAML block-scalar indentation
+          # pitfalls and guarantees valid JSON.
+          jq -n \
+            --argjson fromBuild "$FROM_BUILD" \
+            --arg     fromTag   "$PREV_TAG" \
+            --arg     fromSha256 "$FROM_SHA" \
+            --argjson toBuild   "$NEW_BUILD" \
+            --arg     toTag     "$NEW_TAG" \
+            --arg     toSha256  "$TO_SHA" \
+            --argjson patchSize "$PATCH_BYTES" \
+            --arg     patchSha256 "$PATCH_SHA" \
+            '{fromBuild:$fromBuild, fromTag:$fromTag, fromSha256:$fromSha256, toBuild:$toBuild, toTag:$toTag, toSha256:$toSha256, patchSize:$patchSize, patchSha256:$patchSha256}' \
+            > "$OUT/patch.json"
+
+          echo "patch_ready=true" >> "$GITHUB_OUTPUT"
+          PMB=$(awk -v b="$PATCH_BYTES" 'BEGIN{printf "%.1f", b/1048576}')
+          FMB=$(awk -v b="$FULL_BYTES"  'BEGIN{printf "%.0f", b/1048576}')
+          {
+            echo "## Delta patch"
+            echo ""
+            echo "Patch \`$PREV_TAG\` → \`$NEW_TAG\`: **${PMB} MB** (vs ${FMB} MB full APK)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Compose dynamic release notes
         id: notes
         run: |
@@ -711,8 +810,17 @@ jobs:
         # private source repo — the website and in-app updater both point at
         # Karthik77-kk/kfit, so this is what keeps them working unchanged.
         run: |
+          OUT=build/app/outputs/flutter-apk
+          ASSETS=("$OUT/kfit.apk")
+          # Attach the delta patch + its metadata when this build produced one
+          # (absent on the first release or a native-lib-shift build — see the
+          # "Generate delta patch" step). Purely additive; kfit.apk always ships.
+          if [ -f "$OUT/kfit.patch" ] && [ -f "$OUT/patch.json" ]; then
+            ASSETS+=("$OUT/kfit.patch" "$OUT/patch.json")
+            echo "Attaching delta patch assets: kfit.patch + patch.json"
+          fi
           gh release create "${{ steps.ver.outputs.tag }}" \
-            build/app/outputs/flutter-apk/kfit.apk \
+            "${ASSETS[@]}" \
             --repo Karthik77-kk/kfit \
             --title "${{ steps.ver.outputs.label }}" \
             --notes-file release_notes.md \
