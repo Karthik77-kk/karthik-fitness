@@ -843,7 +843,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               return _Tile(
                 icon: Icons.info_outline,
                 title: 'K Fitness',
-                subtitle: '$label — Personal fitness tracker',
+                subtitle: '$label · Personal fitness tracker',
                 onTap: null,
               );
             },
