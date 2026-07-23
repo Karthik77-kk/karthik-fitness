@@ -625,6 +625,26 @@ jobs:
           APK_SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk | cut -f1)
           echo "✅ APK verified: $APK_SIZE"
 
+      - name: APK size breakdown (what's eating the size)
+        # Lists the 20 largest entries inside the APK so bloat is visible in the
+        # run summary (native inference .so vs app code vs assets). uncompressed
+        # bytes; the .apk itself is smaller after DEFLATE.
+        run: |
+          APK=build/app/outputs/flutter-apk/kfit.apk
+          {
+            echo "## APK size breakdown"
+            echo ""
+            echo "Total APK: **$(du -h "$APK" | cut -f1)**"
+            echo ""
+            echo "| Size (uncompressed) | File |"
+            echo "|---:|---|"
+            unzip -l "$APK" | awk 'NR>3 && $4!="" {printf "%d\t%s\n", $1, $4}' \
+              | sort -rn | head -20 \
+              | awk -F'\t' '{ mb=$1/1048576; printf "| %.1f MB | `%s` |\n", mb, $2 }'
+            echo ""
+            echo "_lib/**/*.so = native runtime (flutter_gemma MediaPipe/LiteRT + Flutter). The Gemma model is downloaded at runtime, not bundled._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Compose dynamic release notes
         id: notes
         run: |
