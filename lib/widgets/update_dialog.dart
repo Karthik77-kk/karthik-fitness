@@ -39,6 +39,10 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   String? _error;
   File? _file;
 
+  // null → indeterminate (delta patch attempt: small/fast, just a spinner);
+  // 0.0–1.0 → live percentage for the full-APK fallback download.
+  double? _downloadProgress;
+
   @override
   void initState() {
     super.initState();
@@ -64,14 +68,25 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   Future<void> _startDownload() async {
     setState(() {
       _phase = _Phase.downloading;
+      _downloadProgress = null; // delta attempt → indeterminate spinner
       _error = null;
     });
     try {
       // Fast path: a small binary patch reconstructed from the installed APK
-      // (usually a few MB). Returns null → full download if no patch applies.
-      // No progress UI — it's small/quick; we just flip to Install when ready.
+      // (usually a few MB). No % UI — it's small/quick, so a spinner reads
+      // honestly; we flip to Install when ready.
       File? file = await widget.service.tryDeltaUpdate(widget.info);
-      file ??= await widget.service.downloadApk(widget.info);
+      if (file == null) {
+        // No patch applies → download the full APK (~180 MB) with a live bar,
+        // so a multi-minute download never looks frozen.
+        if (mounted) setState(() => _downloadProgress = 0);
+        file = await widget.service.downloadApk(
+          widget.info,
+          onProgress: (p) {
+            if (mounted) setState(() => _downloadProgress = p);
+          },
+        );
+      }
       if (!mounted) return;
       setState(() {
         _file = file;
@@ -214,11 +229,34 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     switch (_phase) {
       case _Phase.preparing:
       case _Phase.downloading:
-        // No live progress bar — the delta patch is small/fast, so we just show
-        // a brief "preparing" then flip to Install. Later dismisses; the file
-        // keeps downloading and resumes next launch.
+        final progress = _downloadProgress;
+        // Full-APK fallback: a live percentage bar so a multi-minute, ~180 MB
+        // download never looks frozen. Later dismisses; the file keeps
+        // downloading and resumes next launch.
+        if (progress != null) {
+          final pct = (progress * 100).clamp(0, 100).round();
+          return [
+            LinearProgressIndicator(
+              value: progress,
+              backgroundColor: const Color(0xFF2C2C2E),
+              valueColor:
+                  const AlwaysStoppedAnimation<Color>(Color(0xFF30D158)),
+              minHeight: 6,
+            ),
+            const SizedBox(height: 8),
+            Text('Downloading… $pct%',
+                style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12)),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: _Button(label: 'Later', primary: false, onPressed: _later),
+            ),
+          ];
+        }
+        // Delta patch: small/fast, so an indeterminate spinner reads honestly —
+        // we flip straight to Install when it's ready.
         return [
-          Row(children: const [
+          const Row(children: [
             SizedBox(
               width: 16,
               height: 16,

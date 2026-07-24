@@ -1586,14 +1586,8 @@ class _AutoUpdateEnabledTile extends StatelessWidget {
       child: SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         secondary: const Icon(Icons.system_update_rounded, color: Color(0xFF30D158)),
-        title: const Text('Check for updates on launch',
+        title: const Text('Check for updates automatically',
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-        subtitle: Text(
-          p.autoUpdateCheck
-              ? 'Notified when a new version is available'
-              : 'Updates won\'t be checked automatically',
-          style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
-        ),
         value: p.autoUpdateCheck,
         activeColor: const Color(0xFF30D158),
         onChanged: (v) => context.read<FitnessProvider>().saveAutoUpdateCheck(v),

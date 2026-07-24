@@ -214,6 +214,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
   // ignore: unused_field — Dart lint doesn't recognise ?.cancel() as a "use"
   Timer? _updateCheckTimer;
 
+  // We check for updates on every foreground, not just cold start. This debounces
+  // that so flicking the app in and out doesn't hammer the releases API — one
+  // check per window is plenty to notice a fresh release.
+  static const Duration _updateCheckCooldown = Duration(seconds: 30);
+  DateTime? _lastUpdateCheck;
+
   final List<Widget> _screens = const [
     HomeScreen(),
     NutritionScreen(),
@@ -237,12 +243,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       if (name == 'jaswini' && !MediaQuery.of(context).disableAnimations) {
         setState(() => _showHeart = true);
       }
+      // Recover a meal photo captured if Android killed the WHOLE process (not
+      // just the Activity) while the camera was open. A cold restart never fires
+      // `resumed`, so the resume-path recovery below would miss it — this launch
+      // call is what finishes the scan instead of dumping the user on Home.
+      // No-op unless a scan was actually in flight.
+      recoverLostMealScan(context);
     });
     // Delay the update check so it doesn't compete with loadData() and AI init
-    // during the critical first few seconds. 4 s is enough for loadData() to
+    // during the critical first few seconds. 5 s is enough for loadData() to
     // finish its 60-day JSON parse; the update dialog has no urgency.
     // Stored so dispose() can cancel it and tests don't leak pending timers.
-    _updateCheckTimer = Timer(const Duration(seconds: 4), () {
+    _updateCheckTimer = Timer(const Duration(seconds: 5), () {
       if (mounted) _checkForUpdate();
     });
   }
@@ -285,8 +297,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
 
   Future<void> _checkForUpdate() async {
     if (!mounted) return;
+    if (_updateDialogVisible) return; // already showing/handling an update
     final provider = context.read<FitnessProvider>();
     if (!provider.autoUpdateCheck) return;
+
+    // Debounce rapid foregrounds so we don't spam the releases API on every
+    // quick app-switch; a real re-open minutes later still checks.
+    final now = DateTime.now();
+    if (_lastUpdateCheck != null &&
+        now.difference(_lastUpdateCheck!) < _updateCheckCooldown) {
+      return;
+    }
+    _lastUpdateCheck = now;
 
     try {
       final pkgInfo = await PackageInfo.fromPlatform();
@@ -358,6 +380,9 @@ class _MainNavigationScreenState extends State<MainNavigationScreen>
       // open (low-memory). No-op unless a scan was actually in flight — fixes
       // "take a pic, nothing happens, works the second time".
       recoverLostMealScan(context);
+      // Check for a new release on every foreground, not only cold start, so an
+      // update is offered promptly. Debounced inside _checkForUpdate.
+      _checkForUpdate();
     }
   }
 

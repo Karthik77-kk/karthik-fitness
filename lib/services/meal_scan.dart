@@ -14,14 +14,21 @@ import 'scan_quota.dart';
 const String _kPhotoConsentKey = 'meal_scan_photo_consent';
 
 /// SharedPreferences flag set while the camera is open for a scan. If Android
-/// destroys our Activity under memory pressure while the camera is foregrounded
-/// (common on mid-range phones, or with "Don't keep activities" on), the picked
-/// photo is delivered to a freshly recreated Activity and the original
-/// `pickImage` await never completes — the scan silently dies and the user lands
-/// back on Home. This marker lets [recoverLostMealScan] retrieve that lost photo
-/// on resume and finish the scan. It's the only reason "take a pic → nothing
-/// happens → works the second time" occurs.
+/// reclaims memory while the camera is foregrounded (common on mid-range phones,
+/// or with "Don't keep activities" on) it may destroy just our Activity — or the
+/// WHOLE process. Either way the picked photo is delivered to a freshly
+/// recreated Activity and the original `pickImage` await never completes — the
+/// scan silently dies and the user lands back on Home. This marker (persisted, so
+/// it survives a full process death) lets [recoverLostMealScan] retrieve that
+/// lost photo on the next resume OR cold launch and finish the scan. It's the
+/// reason "take a pic → nothing happens → works the second time" occurs.
 const String _kPendingScanKey = 'meal_scan_pending';
+
+/// Guards [recoverLostMealScan] against re-entrancy: after a process kill the
+/// cold-start recovery (from `initState`) and a `resumed` lifecycle event can
+/// both fire within the same launch. Whichever runs first consumes the pending
+/// photo; the other must no-op instead of double-analysing it.
+bool _recovering = false;
 
 /// "Scan meal" entry point used by both buttons on the Food page.
 /// Flow: quota check → one-time privacy consent → camera capture → Gemini
@@ -69,29 +76,38 @@ Future<void> startMealScan(BuildContext context) async {
   await _analyzeAndShow(context, bytes, prefs);
 }
 
-/// Recovers a meal photo captured while Android had destroyed our Activity
-/// (low-memory kill with the camera foregrounded), then finishes the scan as if
-/// the pick had returned normally. Call on app resume; it no-ops unless a scan
-/// was actually in flight, so it's cheap to call every resume.
+/// Recovers a meal photo captured while Android had killed our Activity — or the
+/// whole process — with the camera foregrounded, then finishes the scan as if
+/// the pick had returned normally. Call it BOTH on app resume and on cold launch:
+/// a warm Activity recreation delivers a `resumed` event, but a full process
+/// death cold-starts the app with no `resumed`, so the launch call is what fixes
+/// "press OK → land on Home". It no-ops unless a scan was actually in flight, so
+/// it's cheap to call every launch/resume.
 Future<void> recoverLostMealScan(BuildContext context) async {
-  if (!GeminiVisionService.isConfigured) return;
-  final prefs = await SharedPreferences.getInstance();
-  if (!(prefs.getBool(_kPendingScanKey) ?? false)) return;
-  // Consume the marker up-front so a second resume can't double-trigger.
-  await prefs.setBool(_kPendingScanKey, false);
-
-  final LostDataResponse resp;
+  if (_recovering) return; // one recovery per launch; see [_recovering]
+  _recovering = true;
   try {
-    resp = await ImagePicker().retrieveLostData();
-  } catch (_) {
-    return; // platform without lost-data support, or nothing pending
-  }
-  final file = resp.file;
-  if (file == null) return; // user cancelled the camera, or nothing to recover
+    if (!GeminiVisionService.isConfigured) return;
+    final prefs = await SharedPreferences.getInstance();
+    if (!(prefs.getBool(_kPendingScanKey) ?? false)) return;
+    // Consume the marker up-front so a second resume can't double-trigger.
+    await prefs.setBool(_kPendingScanKey, false);
 
-  final bytes = await file.readAsBytes();
-  if (!context.mounted) return;
-  await _analyzeAndShow(context, bytes, prefs);
+    final LostDataResponse resp;
+    try {
+      resp = await ImagePicker().retrieveLostData();
+    } catch (_) {
+      return; // platform without lost-data support, or nothing pending
+    }
+    final file = resp.file;
+    if (file == null) return; // user cancelled the camera, or nothing to recover
+
+    final bytes = await file.readAsBytes();
+    if (!context.mounted) return;
+    await _analyzeAndShow(context, bytes, prefs);
+  } finally {
+    _recovering = false;
+  }
 }
 
 /// Shared tail of the scan pipeline: upload [bytes] to the vision service, show
