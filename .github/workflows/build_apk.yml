@@ -29,44 +29,73 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read   # read the merged PR's labels for [patch]/[full-release] overrides
     outputs:
       build: ${{ steps.check.outputs.build }}
+      mode:  ${{ steps.check.outputs.mode }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Decide whether to build
+      - name: Decide build mode (skip / silent patch / full release)
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # HYBRID SHOREBIRD GATE. Three outcomes:
+          #   skip    — no app-relevant change (docs/website/tests only). No build.
+          #   patch   — Dart-ONLY change → `shorebird patch`: a tiny silent OTA applied
+          #             on next launch, no APK, no GitHub release, no version bump.
+          #   release — native/deps/assets/android/workflow change (or a manual run) →
+          #             full `shorebird release`: new APK + GitHub release (this is the
+          #             only path that can create a patch baseline).
+          # A patch can ONLY carry Dart; it rides on the installed release's identical
+          # native code, so the classification MUST be conservative — anything that is
+          # not purely under lib/ falls through to a full release.
           BEFORE="${{ github.event.before }}"
           AFTER="${{ github.sha }}"
           ZERO="0000000000000000000000000000000000000000"
-          # Manual runs, a brand-new branch, or a missing/invalid base → always
-          # build (can't compute a diff, so don't risk skipping a real change).
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || \
              [ -z "$BEFORE" ] || [ "$BEFORE" = "$ZERO" ] || \
              ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "reason=manual/dispatch or no valid base — building" >> "$GITHUB_OUTPUT"
+            # Can't compute a diff → full release (also validates the workflow itself).
+            MODE=release
+            echo "reason=manual/dispatch or no valid base — full release"
           else
             FILES=$(git diff --name-only "$BEFORE" "$AFTER")
             echo "Changed files in this push:"; echo "$FILES"
-            # App-relevant = anything compiled/packaged into the APK, plus the
-            # build workflow itself (so a build_apk.yml change is validated).
-            if echo "$FILES" | grep -qE '^(lib/|android/|assets/|pubspec\.yaml$|pubspec\.lock$|\.github/workflows/build_apk\.yml$)'; then
-              echo "build=true" >> "$GITHUB_OUTPUT"
-              echo "reason=app-relevant files changed — building" >> "$GITHUB_OUTPUT"
+            # Only files that actually go into / affect the APK matter here.
+            APP_FILES=$(echo "$FILES" | grep -E '^(lib/|android/|assets/|pubspec\.(yaml|lock)$|\.github/workflows/build_apk\.yml$)' || true)
+
+            # Manual overrides via the merged PR's labels (Rule 23 — computed, but
+            # you can force either way). Look up the PR(s) associated with this
+            # merge commit; empty/permission-less lookup just means "no override".
+            LABELS=$(gh api "repos/${{ github.repository }}/commits/${AFTER}/pulls" \
+                       --jq '.[].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
+            echo "PR labels: ${LABELS:-<none>}"
+
+            if echo " $LABELS " | grep -q ' full-release '; then
+              MODE=release; echo "reason=forced by [full-release] label"
+            elif echo " $LABELS " | grep -q ' patch '; then
+              MODE=patch;   echo "reason=forced by [patch] label"
+            elif [ -z "$APP_FILES" ]; then
+              MODE=skip;    echo "reason=no app-relevant files — skipping"
+            elif echo "$APP_FILES" | grep -qvE '^lib/'; then
+              MODE=release; echo "reason=native/deps/assets/android/workflow changed — full release"
             else
-              echo "build=false" >> "$GITHUB_OUTPUT"
-              echo "reason=no app-relevant changes — skipping build & release" >> "$GITHUB_OUTPUT"
+              MODE=patch;   echo "reason=Dart-only (all app changes under lib/) — silent patch"
             fi
           fi
+
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          [ "$MODE" = "skip" ] && echo "build=false" >> "$GITHUB_OUTPUT" || echo "build=true" >> "$GITHUB_OUTPUT"
       - name: Summary
         if: always()
         run: |
-          echo "### Build gate: ${{ steps.check.outputs.build == 'true' && 'building' || 'skipped (no app changes)' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Build gate: **${{ steps.check.outputs.mode }}**" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: detect
@@ -89,6 +118,8 @@ jobs:
 
       - name: Compute version (auto, ascending)
         id: ver
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}   # to read the latest release on the public kfit repo
         run: |
           # versionCode = number of commits on main — strictly increases every merge,
           # so we never hand-bump pubspec and PRs can never collide on a version.
@@ -100,6 +131,23 @@ jobs:
           echo "tag=${TAG}"    >> $GITHUB_OUTPUT
           echo "label=${TAG}"  >> $GITHUB_OUTPUT
           echo "Release will be ${TAG} (versionCode ${CODE})"
+
+          # For a PATCH we must target the version users are actually RUNNING — i.e.
+          # the last published RELEASE, not this commit count. Patches don't cut a
+          # release, so after Dart-only merges the count drifts ahead of the release.
+          # Shorebird identifies a release as "<versionName>+<versionCode>"; derive the
+          # code from the latest kfit release tag (v3.0.331 -> 331 -> 3.0.0+331).
+          if [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
+            LT=$(gh release view --repo Karthik77-kk/kfit --json tagName --jq .tagName 2>/dev/null || true)
+            LC="${LT##*.}"
+            if printf '%s' "$LC" | grep -qE '^[0-9]+$'; then
+              echo "release_version=${NAME}+${LC}" >> $GITHUB_OUTPUT
+              echo "Patch will target release ${NAME}+${LC} (from ${LT})"
+            else
+              echo "::error::Could not determine a release to patch (latest kfit tag='${LT}'). A patch needs an existing release baseline."
+              exit 1
+            fi
+          fi
 
       - name: Pre-flight checks (fail fast, before the ~10min build)
         # Catches exactly the two failure modes hit on 2026-07-04: a corrupted/
@@ -603,6 +651,11 @@ jobs:
             echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
             echo "systemProp.org.gradle.internal.repository.max.retries=8"
             echo "systemProp.org.gradle.internal.repository.initial.backoff=500"
+            # Speed: run independent Gradle tasks in parallel and reuse the build
+            # cache across runs (with the Gradle cache action already keyed on
+            # pubspec.lock). Trims a few minutes off the heavier Shorebird build.
+            echo "org.gradle.parallel=true"
+            echo "org.gradle.caching=true"
           } >> "$HOME/.gradle/gradle.properties"
 
       - name: Install Shorebird CLI
@@ -625,50 +678,54 @@ jobs:
           echo "$SB_BIN" >> "$GITHUB_PATH"
           "$SB_BIN/shorebird" --version
 
-      - name: Build APK
-        # --build-number sets the Android versionCode from the auto-computed
-        # commit count (overrides pubspec).
-        # --target-platform android-arm64: ship a single-ABI APK. Without it the
-        # Flutter Gradle plugin builds all three ABIs (arm/arm64/x64) and overrides
-        # the manual `ndk.abiFilters arm64-v8a` in the generated build.gradle — which
-        # is why x86_64 (emulator-only) and armeabi-v7a (32-bit, can't run the ~600 MB
-        # model anyway) were still packaged, ~90 MB of dead weight. arm64-v8a is the
-        # only arch a real target device uses.
-        # --obfuscate --split-debug-info: strips readable Dart symbol names from
-        # the compiled binary (official Flutter release hardening). Debug symbols
-        # are kept as a short-lived artifact below so a stack trace could still be
-        # decoded later if ever needed.
-        # Secrets are base64-encoded before injection so they don't sit as
-        # plaintext, grep-able strings inside the compiled APK (dart-define values
-        # are embedded verbatim as constants otherwise). The app decodes them at
-        # runtime (see e.g. GeminiVisionService._key) — same secret values, same
-        # behavior, just not a raw match for automated token scanners that scrape
-        # public APKs for literal credential patterns.
-        # NOTE (draft): built via `shorebird release` (not plain `flutter build`)
-        # so the APK carries the Shorebird updater — the baseline that future
-        # `shorebird patch` (silent Dart-only OTA) attaches to. `--artifact apk`
-        # emits the APK at the same path as flutter build; all Flutter flags are
-        # passed after `--` (arm64-only, obfuscation, dart-defines, build-number)
-        # so signing/size/hardening are unchanged. GitHub sets CI=true so the
-        # release runs non-interactively. VALIDATE via workflow_dispatch before
-        # this reaches main; if Shorebird lacks Flutter 3.44.0 exactly, bump to
-        # the nearest supported 3.44.z here and in the flutter-action version.
+      - name: Build (Shorebird release or silent patch)
+        # HYBRID BUILD. Same Flutter flags for both paths (identical native code,
+        # arm64-only, obfuscation, dart-defines) so a patch is a valid diff of the
+        # release it targets:
+        #   release → `shorebird release android --artifact apk` — new APK carrying
+        #             the Shorebird updater; published as a GitHub release below.
+        #             --build-number sets versionCode from the commit count.
+        #   patch   → `shorebird patch android --release-version <v>` — builds the
+        #             Dart, diffs it against that release, and uploads a tiny silent
+        #             OTA patch to Shorebird. NO APK, NO GitHub release, NO version
+        #             bump — every publish step below is gated to release mode.
+        # --target-platform android-arm64: single-ABI (Flutter-built libs); the
+        # AAR .so are stripped by the gradle packaging filter. --obfuscate/
+        # --split-debug-info: release hardening; symbols kept as a 1-day artifact.
+        # Secrets are base64-encoded so they aren't plaintext, grep-able strings in
+        # the APK (decoded at runtime, e.g. GeminiVisionService._key). GitHub sets
+        # CI=true so Shorebird runs non-interactively.
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
         run: |
           b64() { printf '%s' "$1" | base64 -w 0; }
-          shorebird release android --artifact apk --flutter-version=3.44.0 -- \
-            --target-platform android-arm64 --no-tree-shake-icons \
-            --obfuscate --split-debug-info=build/symbols \
-            --build-number=${{ steps.ver.outputs.code }} \
-            --dart-define=HF_TOKEN_B64=$(b64 "${{ secrets.HF_TOKEN }}") \
-            --dart-define=FDC_API_KEY_B64=$(b64 "${{ secrets.FDC_API_KEY }}") \
-            --dart-define=GH_BACKUP_TOKEN_B64=$(b64 "${{ secrets.GH_BACKUP_TOKEN }}") \
-            --dart-define=GH_BACKUP_REPO_B64=$(b64 "${{ secrets.GH_BACKUP_REPO }}") \
-            --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}") \
+          # base64 -w 0 values contain no spaces, so array elements stay intact.
+          FLAGS=(
+            --target-platform android-arm64 --no-tree-shake-icons
+            --obfuscate --split-debug-info=build/symbols
+            --dart-define=HF_TOKEN_B64=$(b64 "${{ secrets.HF_TOKEN }}")
+            --dart-define=FDC_API_KEY_B64=$(b64 "${{ secrets.FDC_API_KEY }}")
+            --dart-define=GH_BACKUP_TOKEN_B64=$(b64 "${{ secrets.GH_BACKUP_TOKEN }}")
+            --dart-define=GH_BACKUP_REPO_B64=$(b64 "${{ secrets.GH_BACKUP_REPO }}")
+            --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}")
             --dart-define=EXPECTED_SIGNING_SHA256=${{ steps.sign.outputs.sha256 }}
+          )
+          if [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
+            echo "🩹 Silent patch → release ${{ steps.ver.outputs.release_version }}"
+            shorebird patch android \
+              --release-version="${{ steps.ver.outputs.release_version }}" \
+              --flutter-version=3.44.0 -- "${FLAGS[@]}"
+          else
+            echo "📦 Full release (versionCode ${{ steps.ver.outputs.code }})"
+            shorebird release android --artifact apk --flutter-version=3.44.0 -- \
+              "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
+          fi
 
+      # ── Everything below publishes an APK/GitHub release → RELEASE MODE ONLY.
+      # A patch produces no installable APK (it uploads a diff to Shorebird), so
+      # these are all skipped for patch mode.
       - name: Upload debug symbols
+        if: needs.detect.outputs.mode == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: debug-symbols
@@ -676,9 +733,11 @@ jobs:
           retention-days: 1
 
       - name: Rename APK
+        if: needs.detect.outputs.mode == 'release'
         run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/kfit.apk
 
       - name: Upload APK artifact
+        if: needs.detect.outputs.mode == 'release'
         uses: actions/upload-artifact@v7
         with:
           name: kfit
@@ -690,6 +749,7 @@ jobs:
           retention-days: 1
 
       - name: Verify APK exists before release
+        if: needs.detect.outputs.mode == 'release'
         run: |
           if [ ! -f build/app/outputs/flutter-apk/kfit.apk ]; then
             echo "❌ ERROR: kfit.apk not found at build/app/outputs/flutter-apk/kfit.apk"
@@ -700,6 +760,7 @@ jobs:
           echo "✅ APK verified: $APK_SIZE"
 
       - name: APK size breakdown (what's eating the size)
+        if: needs.detect.outputs.mode == 'release'
         # Lists the 20 largest entries inside the APK so bloat is visible in the
         # run summary (native inference .so vs app code vs assets). uncompressed
         # bytes; the .apk itself is smaller after DEFLATE.
@@ -721,6 +782,7 @@ jobs:
 
       - name: Generate delta patch from previous release (best-effort, never fatal)
         id: patch
+        if: needs.detect.outputs.mode == 'release'
         # DELTA UPDATE — Phase 1 (inert). The ~170 MB APK is mostly a byte-identical
         # native AI runtime; only the compiled Dart (libapp.so, a few MB) changes
         # between builds. So a binary patch from the PREVIOUS release's kfit.apk to
@@ -820,6 +882,7 @@ jobs:
 
       - name: Compose dynamic release notes
         id: notes
+        if: needs.detect.outputs.mode == 'release'
         run: |
           set -e
           # What's-new must list ONLY the commits THIS push adds — not a rolling
@@ -884,11 +947,12 @@ jobs:
         # private source repo — the website and in-app updater both point at
         # Karthik77-kk/kfit, so this is what keeps them working unchanged.
         #
-        # Only on a real push to main. A `workflow_dispatch` run (used to VALIDATE
-        # a branch — e.g. the Shorebird build) still builds + uploads the APK
-        # artifact for hands-on testing, but must NOT publish a user-facing
-        # release from an unmerged/unverified branch.
-        if: github.event_name == 'push'
+        # Only on a real push to main, and only in RELEASE mode (a patch has no
+        # APK to publish). A `workflow_dispatch` run (used to VALIDATE a branch —
+        # e.g. the Shorebird build) still builds + uploads the APK artifact for
+        # hands-on testing, but must NOT publish a user-facing release from an
+        # unmerged/unverified branch.
+        if: github.event_name == 'push' && needs.detect.outputs.mode == 'release'
         run: |
           OUT=build/app/outputs/flutter-apk
           ASSETS=("$OUT/kfit.apk")
@@ -911,13 +975,25 @@ jobs:
       - name: Job summary
         if: always()
         run: |
-          SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk 2>/dev/null | cut -f1 || echo "?")
-          {
-            echo "## Build & Release"
-            echo ""
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Release | \`${{ steps.ver.outputs.tag }}\` (versionCode ${{ steps.ver.outputs.code }}) |"
-            echo "| APK size | ${SIZE} |"
-            echo "| Published to | [Karthik77-kk/kfit releases](https://github.com/Karthik77-kk/kfit/releases/tag/${{ steps.ver.outputs.tag }}) |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
+            {
+              echo "## 🩹 Silent patch"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Type | Shorebird OTA patch (Dart-only, no new APK/release) |"
+              echo "| Applied to release | \`${{ steps.ver.outputs.release_version }}\` |"
+              echo "| Users get it | automatically on next app launch |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk 2>/dev/null | cut -f1 || echo "?")
+            {
+              echo "## 📦 Build & Release"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Release | \`${{ steps.ver.outputs.tag }}\` (versionCode ${{ steps.ver.outputs.code }}) |"
+              echo "| APK size | ${SIZE} |"
+              echo "| Published to | [Karthik77-kk/kfit releases](https://github.com/Karthik77-kk/kfit/releases/tag/${{ steps.ver.outputs.tag }}) |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
