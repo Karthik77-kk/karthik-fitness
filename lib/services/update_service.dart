@@ -1,12 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+
+import 'apk_patcher.dart';
 
 const _repo = 'Karthik77-kk/kfit';
 const _apiUrl = 'https://api.github.com/repos/$_repo/releases/latest';
 const _assetName = 'kfit.apk';
+const _patchName = 'kfit.patch';
+const _patchMetaName = 'patch.json';
+
+/// Reads the installed base APK's path (`applicationInfo.sourceDir`) — the exact
+/// bytes this app was installed from, which a delta patch reconstructs against.
+const _integrityChannel = MethodChannel('com.kfitness/integrity');
 
 class AppUpdateInfo {
   final String tag;
@@ -16,6 +27,13 @@ class AppUpdateInfo {
   final String apkUrl;
   final int sizeBytes;
 
+  /// Download URLs for the optional delta-patch assets (`kfit.patch` and
+  /// `patch.json`). Null when this release carries no patch — the app then just
+  /// does a full download. Present only from the build that first added patch
+  /// generation onward.
+  final String? patchUrl;
+  final String? patchMetaUrl;
+
   const AppUpdateInfo({
     required this.tag,
     required this.build,
@@ -23,7 +41,60 @@ class AppUpdateInfo {
     required this.notes,
     required this.apkUrl,
     required this.sizeBytes,
+    this.patchUrl,
+    this.patchMetaUrl,
   });
+}
+
+/// Parsed `patch.json` — describes the single `prev → this` delta the release
+/// ships, and carries the two SHA-256 gates that make applying it safe:
+/// [fromSha256] (the installed APK a patch expects) and [toSha256] (the exact
+/// signed APK the reconstruction must reproduce).
+class PatchMeta {
+  final int fromBuild;
+  final int toBuild;
+  final String fromSha256;
+  final String toSha256;
+  final String? patchSha256;
+  final int patchSize;
+
+  const PatchMeta({
+    required this.fromBuild,
+    required this.toBuild,
+    required this.fromSha256,
+    required this.toSha256,
+    this.patchSha256,
+    this.patchSize = 0,
+  });
+
+  /// Parses `patch.json`. Returns null if any required field is missing/malformed
+  /// so the caller falls back to a full download rather than trusting bad data.
+  static PatchMeta? parse(Map<String, dynamic> json) {
+    try {
+      final fromBuild = json['fromBuild'] as int?;
+      final toBuild = json['toBuild'] as int?;
+      final fromSha = (json['fromSha256'] as String?)?.toLowerCase();
+      final toSha = (json['toSha256'] as String?)?.toLowerCase();
+      if (fromBuild == null ||
+          toBuild == null ||
+          fromSha == null ||
+          fromSha.isEmpty ||
+          toSha == null ||
+          toSha.isEmpty) {
+        return null;
+      }
+      return PatchMeta(
+        fromBuild: fromBuild,
+        toBuild: toBuild,
+        fromSha256: fromSha,
+        toSha256: toSha,
+        patchSha256: (json['patchSha256'] as String?)?.toLowerCase(),
+        patchSize: (json['patchSize'] as int?) ?? 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 class UpdateService {
@@ -48,7 +119,18 @@ class UpdateService {
       if (build == null) return null;
 
       final assets = (json['assets'] as List<dynamic>?) ?? [];
-      final asset = assets.cast<Map<String, dynamic>>().firstWhere(
+      final list = assets.cast<Map<String, dynamic>>();
+
+      String? urlOf(String name) {
+        final a = list.firstWhere(
+          (a) => (a['name'] as String?) == name,
+          orElse: () => const {},
+        );
+        final u = a['browser_download_url'] as String?;
+        return (u != null && u.isNotEmpty) ? u : null;
+      }
+
+      final asset = list.firstWhere(
         (a) => (a['name'] as String?) == _assetName,
         orElse: () => {},
       );
@@ -64,6 +146,8 @@ class UpdateService {
         notes: (json['body'] as String?) ?? '',
         apkUrl: apkUrl,
         sizeBytes: (asset['size'] as int?) ?? 0,
+        patchUrl: urlOf(_patchName),
+        patchMetaUrl: urlOf(_patchMetaName),
       );
     } catch (_) {
       return null;
@@ -193,6 +277,123 @@ class UpdateService {
 
     onProgress?.call(1);
     return dest;
+  }
+
+  /// Attempts a small **delta update**: instead of the full ~170 MB APK, download
+  /// only the `kfit.patch` binary diff and reconstruct the new APK from the one
+  /// already installed on the device. Returns the reconstructed [File] (identical
+  /// bytes to [info]'s `kfit.apk`, so it installs in place like any update), or
+  /// **null** on any reason it can't/shouldn't — the caller then falls back to
+  /// [downloadApk]. It is safe by construction: the result is only returned if it
+  /// reproduces the exact signed APK.
+  ///
+  /// Steps (each a bail-out to full download): patch assets present → fetch tiny
+  /// `patch.json` → this patch targets [info] and starts from *our exact* build →
+  /// the installed APK's SHA-256 equals `fromSha256` → download + (optionally
+  /// verify) the patch → apply it → the reconstruction's SHA-256 equals
+  /// `toSha256`. Only the last, verified file is handed back.
+  ///
+  /// [currentBuild] / [installedApkPath] / [dir] are injectable for tests; in
+  /// production they resolve from `package_info_plus`, the platform channel, and
+  /// the temp dir respectively.
+  Future<File?> tryDeltaUpdate(
+    AppUpdateInfo info, {
+    void Function(double progress)? onProgress,
+    Directory? dir,
+    int? currentBuild,
+    String? installedApkPath,
+  }) async {
+    try {
+      final patchUrl = info.patchUrl;
+      final metaUrl = info.patchMetaUrl;
+      if (patchUrl == null || metaUrl == null) return null;
+
+      // 1. Tiny patch.json.
+      final metaResp = await _client
+          .get(Uri.parse(metaUrl))
+          .timeout(const Duration(seconds: 8));
+      if (metaResp.statusCode != 200) return null;
+      final meta = PatchMeta.parse(jsonDecode(metaResp.body) as Map<String, dynamic>);
+      if (meta == null) return null;
+      // The patch must actually produce THIS release.
+      if (meta.toBuild != info.build) return null;
+
+      // 2. Only useful if we're exactly the build this patch starts from.
+      final cur = currentBuild ??
+          int.tryParse((await PackageInfo.fromPlatform()).buildNumber) ??
+          0;
+      if (cur == 0 || meta.fromBuild != cur) return null;
+
+      // 3. The installed APK must be byte-identical to what the patch expects.
+      final apkPath = installedApkPath ?? await _installedApkPath();
+      if (apkPath == null) return null;
+      if (!await File(apkPath).exists()) return null;
+      final fromSha = await _sha256OfFile(apkPath);
+      if (fromSha != meta.fromSha256) return null;
+
+      // 4. Download the (small) patch. Purge other builds' cached APKs first, as
+      //    downloadApk does, so at most one build's cache exists.
+      final tmp = dir ?? await getTemporaryDirectory();
+      await cleanupCachedApks(keepBuild: info.build, dir: tmp);
+      final patchResp = await _client
+          .get(Uri.parse(patchUrl))
+          .timeout(const Duration(seconds: 60));
+      if (patchResp.statusCode != 200) return null;
+      final patchBytes = patchResp.bodyBytes;
+      onProgress?.call(0.5);
+      if (meta.patchSha256 != null && meta.patchSha256!.isNotEmpty) {
+        if (sha256.convert(patchBytes).toString() != meta.patchSha256) return null;
+      }
+
+      // 5. Reconstruct into a scratch file (memory-safe: see ApkPatcher).
+      final dest = File('${tmp.path}/kfit_${info.build}.apk');
+      final workPath = '${tmp.path}/kfit_${info.build}.apk.recon';
+      await ApkPatcher.applyToFile(
+        oldPath: apkPath,
+        patch: patchBytes,
+        outPath: workPath,
+      );
+
+      // 6. Gate: the reconstruction MUST equal the real signed APK, else discard.
+      final toSha = await _sha256OfFile(workPath);
+      if (toSha != meta.toSha256) {
+        await _tryDelete(workPath);
+        return null;
+      }
+      if (await dest.exists()) await dest.delete();
+      await File(workPath).rename(dest.path);
+      onProgress?.call(1);
+      return dest;
+    } catch (_) {
+      // ANY failure → let the caller do a normal full download.
+      return null;
+    }
+  }
+
+  /// Path to the installed base APK (`applicationInfo.sourceDir`) via the platform
+  /// channel, or null if unavailable (non-Android, error, timeout).
+  Future<String?> _installedApkPath() async {
+    try {
+      return await _integrityChannel
+          .invokeMethod<String>('getInstalledApkPath')
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Streaming SHA-256 of a file — reads in chunks so a ~170 MB APK is never held
+  /// in the heap at once.
+  Future<String> _sha256OfFile(String path) async {
+    final digest = await sha256.bind(File(path).openRead()).first;
+    return digest.toString();
+  }
+
+  static Future<void> _tryDelete(String path) async {
+    try {
+      final f = File(path);
+      if (await f.exists()) await f.delete();
+    } catch (_) {/* best-effort */}
   }
 
   /// Opens the downloaded APK with the system package installer.

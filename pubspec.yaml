@@ -23,6 +23,8 @@ dependencies:
   flutter_gemma: ^0.16.3
   permission_handler: ^11.3.1
   http: ^1.2.0
+  archive: ^4.0.9   # bzip2 decode for bsdiff delta-update patches
+  crypto: ^3.0.7    # SHA-256 gates for delta-update integrity
   flutter_animate: ^4.5.2
   skeletonizer: ^2.1.3
   animations: ^2.2.0

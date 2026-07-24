@@ -39,6 +39,9 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   double _progress = 0;
   String? _error;
   File? _file;
+  // True while attempting the small delta-patch path (before any full-download
+  // fallback), so the UI can say "small update" instead of the full size.
+  bool _delta = false;
 
   @override
   void initState() {
@@ -67,14 +70,31 @@ class _UpdateSheetState extends State<_UpdateSheet> {
       _phase = _Phase.downloading;
       _progress = 0;
       _error = null;
+      _delta = true; // optimistically try the small patch path first
     });
     try {
-      final file = await widget.service.downloadApk(
+      // Fast path: a small binary patch reconstructed from the installed APK.
+      // Returns null (→ full download) if no patch applies to this device.
+      File? file = await widget.service.tryDeltaUpdate(
         widget.info,
         onProgress: (p) {
           if (mounted) setState(() => _progress = p);
         },
       );
+      if (file == null) {
+        if (mounted) {
+          setState(() {
+            _delta = false;
+            _progress = 0;
+          });
+        }
+        file = await widget.service.downloadApk(
+          widget.info,
+          onProgress: (p) {
+            if (mounted) setState(() => _progress = p);
+          },
+        );
+      }
       if (!mounted) return;
       setState(() {
         _file = file;
@@ -230,9 +250,13 @@ class _UpdateSheetState extends State<_UpdateSheet> {
           Text(
             _phase == _Phase.preparing
                 ? 'Preparing…'
-                : _progress > 0
-                    ? 'Downloading in the background… $pct%'
-                    : 'Starting download…',
+                : _delta
+                    ? (_progress > 0
+                        ? 'Downloading small update… $pct%'
+                        : 'Preparing small update…')
+                    : _progress > 0
+                        ? 'Downloading in the background… $pct%'
+                        : 'Starting download…',
             style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
           ),
           const SizedBox(height: 12),
