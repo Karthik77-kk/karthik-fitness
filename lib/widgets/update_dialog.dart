@@ -36,12 +36,8 @@ class _UpdateSheet extends StatefulWidget {
 
 class _UpdateSheetState extends State<_UpdateSheet> {
   _Phase _phase = _Phase.preparing;
-  double _progress = 0;
   String? _error;
   File? _file;
-  // True while attempting the small delta-patch path (before any full-download
-  // fallback), so the UI can say "small update" instead of the full size.
-  bool _delta = false;
 
   @override
   void initState() {
@@ -68,33 +64,14 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   Future<void> _startDownload() async {
     setState(() {
       _phase = _Phase.downloading;
-      _progress = 0;
       _error = null;
-      _delta = true; // optimistically try the small patch path first
     });
     try {
-      // Fast path: a small binary patch reconstructed from the installed APK.
-      // Returns null (→ full download) if no patch applies to this device.
-      File? file = await widget.service.tryDeltaUpdate(
-        widget.info,
-        onProgress: (p) {
-          if (mounted) setState(() => _progress = p);
-        },
-      );
-      if (file == null) {
-        if (mounted) {
-          setState(() {
-            _delta = false;
-            _progress = 0;
-          });
-        }
-        file = await widget.service.downloadApk(
-          widget.info,
-          onProgress: (p) {
-            if (mounted) setState(() => _progress = p);
-          },
-        );
-      }
+      // Fast path: a small binary patch reconstructed from the installed APK
+      // (usually a few MB). Returns null → full download if no patch applies.
+      // No progress UI — it's small/quick; we just flip to Install when ready.
+      File? file = await widget.service.tryDeltaUpdate(widget.info);
+      file ??= await widget.service.downloadApk(widget.info);
       if (!mounted) return;
       setState(() {
         _file = file;
@@ -237,30 +214,22 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     switch (_phase) {
       case _Phase.preparing:
       case _Phase.downloading:
-        final pct = (_progress * 100).clamp(0, 100).toInt();
+        // No live progress bar — the delta patch is small/fast, so we just show
+        // a brief "preparing" then flip to Install. Later dismisses; the file
+        // keeps downloading and resumes next launch.
         return [
-          LinearProgressIndicator(
-            value: _phase == _Phase.downloading && _progress > 0 ? _progress : null,
-            backgroundColor: const Color(0xFF2C2C2E),
-            valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF30D158)),
-            minHeight: 6,
-            borderRadius: BorderRadius.circular(2),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _phase == _Phase.preparing
-                ? 'Preparing…'
-                : _delta
-                    ? (_progress > 0
-                        ? 'Downloading small update… $pct%'
-                        : 'Preparing small update…')
-                    : _progress > 0
-                        ? 'Downloading in the background… $pct%'
-                        : 'Starting download…',
-            style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
-          ),
+          Row(children: const [
+            SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Color(0xFF30D158)),
+            ),
+            SizedBox(width: 10),
+            Text('Preparing update…',
+                style: TextStyle(color: Color(0xFF8E8E93), fontSize: 12)),
+          ]),
           const SizedBox(height: 12),
-          // Let the user dismiss while it keeps downloading (resumes next time).
           SizedBox(
             width: double.infinity,
             child: _Button(label: 'Later', primary: false, onPressed: _later),
