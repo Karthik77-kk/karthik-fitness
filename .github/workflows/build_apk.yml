@@ -710,7 +710,18 @@ jobs:
             --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}")
             --dart-define=EXPECTED_SIGNING_SHA256=${{ steps.sign.outputs.sha256 }}
           )
-          if [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # VALIDATION ONLY. A manual dispatch is used to check that a branch still
+            # builds — it must NOT run `shorebird release`, because that permanently
+            # registers versionCode N (= commit count) on Shorebird's backend, and
+            # the eventual squash-merge of that branch lands on the SAME N → the real
+            # release then fails "existing android release for version 3.0.0+N".
+            # A plain flutter build exercises the same compile/gradle/disk path with
+            # identical flags but reserves no version. (Discovered 2026-07-24: a
+            # dispatch that pre-registered 3.0.0+332 blocked the merge's release.)
+            echo "🔎 Validation build (dispatch) — plain flutter build, no Shorebird release registered."
+            flutter build apk --release "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
+          elif [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
             echo "🩹 Silent patch → release ${{ steps.ver.outputs.release_version }}"
             shorebird patch android \
               --release-version="${{ steps.ver.outputs.release_version }}" \
