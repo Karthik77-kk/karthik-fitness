@@ -341,6 +341,15 @@ jobs:
               '    }',
               '}',
               '',
+              '// Shorebird builds an app bundle (bundleRelease) for its release',
+              "// baseline; on Gradle 9.x the Flutter plugin's copyJniLibs Copy task",
+              '// aborts on a duplicate arm64-v8a/libapp.so with no strategy set.',
+              '// EXCLUDE keeps the first and drops the dup (the lib is still packaged',
+              '// once) — scoped to copyJniLibs so no other copy task is affected.',
+              'tasks.matching { it.name.startsWith("copyJniLibs") }.configureEach {',
+              '    duplicatesStrategy = DuplicatesStrategy.EXCLUDE',
+              '}',
+              '',
               'flutter {',
               '    source "../.."',
               '}',
@@ -570,6 +579,52 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
+      - name: Reclaim disk + Gradle network resilience (Shorebird build is heavy)
+        # Shorebird downloads a SECOND Flutter (~2 GB) and builds an app bundle with
+        # ALL THREE ABIs (arm/arm64/x64); with flutter_gemma's large MediaPipe .so per
+        # ABI this overruns the runner's ~14 GB free space and dies at
+        # packageReleaseBundle with "No space left on device". Reclaim ~20-30 GB by
+        # deleting preinstalled toolchains we never use — WITHOUT touching the Android
+        # SDK, Temurin Java, or Flutter (the build needs those; note we delete only the
+        # CodeQL entry under hostedtoolcache, never the whole cache). Also harden Gradle
+        # against the transient Maven read-timeout seen earlier: retry slow artifact
+        # fetches with backoff instead of failing the whole resolution.
+        run: |
+          echo "disk before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/share/swift /opt/microsoft \
+                      /usr/local/share/boost /usr/local/graalvm \
+                      /usr/local/share/powershell /usr/lib/google-cloud-sdk 2>/dev/null || true
+          docker image prune -af 2>/dev/null || true
+          echo "disk after:"; df -h / | tail -1
+          mkdir -p "$HOME/.gradle"
+          {
+            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+            echo "systemProp.org.gradle.internal.repository.max.retries=8"
+            echo "systemProp.org.gradle.internal.repository.initial.backoff=500"
+          } >> "$HOME/.gradle/gradle.properties"
+
+      - name: Install Shorebird CLI
+        # Shorebird wraps `flutter build` with its own (patched) Flutter so future
+        # Dart-only changes can ship as silent over-the-air patches. It manages its
+        # own Flutter in ~/.config/shorebird — coexists with the flutter-action
+        # Flutter used above for `flutter create`/`pub get`. shorebird.yaml
+        # (committed) + SHOREBIRD_TOKEN are the only config; no build.gradle needed.
+        run: |
+          curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | bash
+          # PATH exports don't cross GitHub Actions steps — persist via $GITHUB_PATH.
+          # The installer clones to ~/.config/shorebird (XDG); binary is bin/shorebird.
+          # Locate it dynamically (Rule 23) so an installer path change can't silently
+          # break us, and FAIL FAST here instead of 10 min later in the build step.
+          SB_BIN="$HOME/.config/shorebird/bin"
+          if [ ! -x "$SB_BIN/shorebird" ]; then
+            SB_BIN="$(dirname "$(find "$HOME" -type f -name shorebird -path '*/bin/*' 2>/dev/null | head -1)")"
+          fi
+          test -x "$SB_BIN/shorebird" || { echo "::error::shorebird binary not found after install"; exit 1; }
+          echo "$SB_BIN" >> "$GITHUB_PATH"
+          "$SB_BIN/shorebird" --version
+
       - name: Build APK
         # --build-number sets the Android versionCode from the auto-computed
         # commit count (overrides pubspec).
@@ -589,9 +644,21 @@ jobs:
         # runtime (see e.g. GeminiVisionService._key) — same secret values, same
         # behavior, just not a raw match for automated token scanners that scrape
         # public APKs for literal credential patterns.
+        # NOTE (draft): built via `shorebird release` (not plain `flutter build`)
+        # so the APK carries the Shorebird updater — the baseline that future
+        # `shorebird patch` (silent Dart-only OTA) attaches to. `--artifact apk`
+        # emits the APK at the same path as flutter build; all Flutter flags are
+        # passed after `--` (arm64-only, obfuscation, dart-defines, build-number)
+        # so signing/size/hardening are unchanged. GitHub sets CI=true so the
+        # release runs non-interactively. VALIDATE via workflow_dispatch before
+        # this reaches main; if Shorebird lacks Flutter 3.44.0 exactly, bump to
+        # the nearest supported 3.44.z here and in the flutter-action version.
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
         run: |
           b64() { printf '%s' "$1" | base64 -w 0; }
-          flutter build apk --release --target-platform android-arm64 --no-tree-shake-icons \
+          shorebird release android --artifact apk --flutter-version=3.44.0 -- \
+            --target-platform android-arm64 --no-tree-shake-icons \
             --obfuscate --split-debug-info=build/symbols \
             --build-number=${{ steps.ver.outputs.code }} \
             --dart-define=HF_TOKEN_B64=$(b64 "${{ secrets.HF_TOKEN }}") \
@@ -816,6 +883,12 @@ jobs:
         # Publishes to the public kfit repo (distribution-only), not this
         # private source repo — the website and in-app updater both point at
         # Karthik77-kk/kfit, so this is what keeps them working unchanged.
+        #
+        # Only on a real push to main. A `workflow_dispatch` run (used to VALIDATE
+        # a branch — e.g. the Shorebird build) still builds + uploads the APK
+        # artifact for hands-on testing, but must NOT publish a user-facing
+        # release from an unmerged/unverified branch.
+        if: github.event_name == 'push'
         run: |
           OUT=build/app/outputs/flutter-apk
           ASSETS=("$OUT/kfit.apk")
