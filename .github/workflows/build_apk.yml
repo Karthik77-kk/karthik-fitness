@@ -728,7 +728,13 @@ jobs:
             # of its target release automatically, so pinning it here is both
             # invalid (exit 64 "Could not find an option named --flutter-version")
             # and unnecessary. Everything after `--` is proxied to `flutter build`.
-            shorebird patch android \
+            # --allow-asset-diffs: Flutter regenerates NativeAssetsManifest.json
+            # per build, so a patch trips a benign asset-diff and aborts (exit 70,
+            # UnpatchableChangeException). Safe here because `detect` only ever
+            # patches lib/-only diffs — a real assets/ change forces release mode,
+            # so a patch can never carry a legitimate asset change. Native diffs
+            # are intentionally NOT allowed (they must still fail).
+            shorebird patch android --allow-asset-diffs \
               --release-version="${{ steps.ver.outputs.release_version }}" \
               -- "${FLAGS[@]}"
           else
