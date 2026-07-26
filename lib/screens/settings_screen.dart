@@ -659,6 +659,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // ── AI COACH ──────────────────────────────────────────────
           _Header('AI Coach'),
           _AiCoachEnabledTile(),
+          // Daily brief has its own switch — it stays available even with the
+          // chat coach off. Only meaningful when a cloud key powers it.
+          if (GeminiTextService.isConfigured) ...[
+            const SizedBox(height: 8),
+            _AiBriefEnabledTile(),
+          ],
           if (p.aiCoachEnabled) ...[
             // Engine picker (only when a cloud key is compiled in — else on-device only).
             if (GeminiTextService.isConfigured) ...[
@@ -783,6 +789,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onChanged: _cloudBusy
                       ? null
                       : (v) async {
+                          Haptics.selection();
                           await CloudBackupService.instance.setAutoBackup(v);
                           setState(() => _cloudAuto = v);
                         },
@@ -1390,7 +1397,14 @@ class _Tile extends StatelessWidget {
         trailing: trailing ?? (onTap != null
             ? const Icon(Icons.chevron_right, color: Color(0xFF8E8E93))
             : null),
-        onTap: onTap,
+        // A light tick on every tappable settings row (respects the global
+        // haptics toggle — a no-op when the user has switched haptics off).
+        onTap: onTap == null
+            ? null
+            : () {
+                Haptics.selection();
+                onTap!();
+              },
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
     ),
@@ -1420,7 +1434,43 @@ class _AiCoachEnabledTile extends StatelessWidget {
         ),
         value: p.aiCoachEnabled,
         activeColor: const Color(0xFF30D158),
-        onChanged: (v) => context.read<FitnessProvider>().saveAiCoachEnabled(v),
+        onChanged: (v) {
+          Haptics.selection();
+          context.read<FitnessProvider>().saveAiCoachEnabled(v);
+        },
+      ),
+    );
+  }
+}
+
+// ── Daily AI brief toggle (independent of the chat coach) ─────────────────────
+class _AiBriefEnabledTile extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final p = context.watch<FitnessProvider>();
+    return Material(
+      // Material carries the colour so the SwitchListTile's ink stays visible.
+      color: const Color(0xFF1E1E22),
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: SwitchListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        secondary:
+            const Icon(Icons.auto_awesome_rounded, color: Color(0xFF40C8E0)),
+        title: const Text('Daily AI brief',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        subtitle: Text(
+          p.aiBriefEnabled
+              ? 'A fresh once-a-day summary on Home — shows even with chat off'
+              : 'No daily summary on Home',
+          style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
+        ),
+        value: p.aiBriefEnabled,
+        activeColor: const Color(0xFF40C8E0),
+        onChanged: (v) {
+          Haptics.selection();
+          context.read<FitnessProvider>().saveAiBriefEnabled(v);
+        },
       ),
     );
   }
@@ -1436,7 +1486,10 @@ class _AiCoachModeTile extends StatelessWidget {
     final sel = current == mode;
     return Expanded(
       child: GestureDetector(
-        onTap: () => context.read<FitnessProvider>().saveAiCoachMode(mode),
+        onTap: () {
+          Haptics.selection();
+          context.read<FitnessProvider>().saveAiCoachMode(mode);
+        },
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
           decoration: BoxDecoration(
@@ -1568,7 +1621,10 @@ class _AiAutoLoadTile extends StatelessWidget {
         ),
         value: ai.autoLoad,
         activeColor: const Color(0xFF30D158),
-        onChanged: (v) => context.read<OnDeviceAiService>().saveAutoLoad(v),
+        onChanged: (v) {
+          Haptics.selection();
+          context.read<OnDeviceAiService>().saveAutoLoad(v);
+        },
       ),
     );
   }
@@ -1590,7 +1646,10 @@ class _AutoUpdateEnabledTile extends StatelessWidget {
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
         value: p.autoUpdateCheck,
         activeColor: const Color(0xFF30D158),
-        onChanged: (v) => context.read<FitnessProvider>().saveAutoUpdateCheck(v),
+        onChanged: (v) {
+          Haptics.selection();
+          context.read<FitnessProvider>().saveAutoUpdateCheck(v);
+        },
       ),
     );
   }

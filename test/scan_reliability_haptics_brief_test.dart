@@ -69,6 +69,57 @@ void main() {
     });
   });
 
+  // ─── Daily-brief toggle, decoupled from the chat coach ────────────────────
+  group('aiBriefEnabled toggle', () {
+    test('defaults on for a fresh install', () async {
+      SharedPreferences.setMockInitialValues({});
+      final p = FitnessProvider();
+      await p.loadData();
+      expect(p.aiBriefEnabled, isTrue);
+    });
+
+    test('save persists the flag and survives a reload', () async {
+      SharedPreferences.setMockInitialValues({});
+      final p = FitnessProvider();
+      await p.loadData();
+
+      await p.saveAiBriefEnabled(false);
+      expect(p.aiBriefEnabled, isFalse);
+
+      // A brand-new provider reading the same prefs must see the saved value.
+      final p2 = FitnessProvider();
+      await p2.loadData();
+      expect(p2.aiBriefEnabled, isFalse);
+    });
+
+    test('is independent of the AI chat coach toggle', () async {
+      SharedPreferences.setMockInitialValues({});
+      final p = FitnessProvider();
+      await p.loadData();
+
+      // Turning the chat coach off must NOT disable the daily brief.
+      await p.saveAiCoachEnabled(false);
+      expect(p.aiCoachEnabled, isFalse);
+      expect(p.aiBriefEnabled, isTrue);
+
+      // …and vice-versa.
+      await p.saveAiBriefEnabled(false);
+      await p.saveAiCoachEnabled(true);
+      expect(p.aiCoachEnabled, isTrue);
+      expect(p.aiBriefEnabled, isFalse);
+    });
+
+    test('refreshDailyBriefIfDue no-ops when the brief is disabled', () async {
+      SharedPreferences.setMockInitialValues({});
+      final p = FitnessProvider();
+      await p.loadData();
+      await p.saveAiBriefEnabled(false);
+      // Disabled + no cloud key → returns the (null) cached brief, no throw.
+      expect(await p.refreshDailyBriefIfDue(), isNull);
+      expect(p.dailyBrief, isNull);
+    });
+  });
+
   // ─── Lost meal-scan recovery guard ────────────────────────────────────────
   group('recoverLostMealScan', () {
     testWidgets('no-ops (no throw, no navigation) when nothing is pending',

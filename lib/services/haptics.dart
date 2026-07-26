@@ -83,8 +83,9 @@ class HapticScroll extends StatefulWidget {
 }
 
 class _HapticScrollState extends State<HapticScroll> {
-  /// Logical pixels of drag between scroll ticks.
-  static const double _tickPx = 42;
+  /// Logical pixels of drag between scroll ticks. Higher = fewer, subtler ticks
+  /// while scrolling (raised from 42 so the feedback is gentler, not constant).
+  static const double _tickPx = 64;
 
   /// Floor on the gap between ticks so a fast flick can't rattle.
   static const int _minGapMs = 18;

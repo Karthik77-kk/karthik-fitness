@@ -284,6 +284,12 @@ class FitnessProvider extends ChangeNotifier {
   String? _dailyBrief;
   String? get dailyBrief => _dailyBrief;
 
+  /// The daily brief is independent of [aiCoachEnabled]: it still appears on
+  /// Home (and refreshes once a day) even when the chat coach is switched off,
+  /// unless the user turns THIS off too. Defaults on so existing users keep it.
+  bool _aiBriefEnabled = true;
+  bool get aiBriefEnabled => _aiBriefEnabled;
+
   bool _autoUpdateCheck = true;
   bool get autoUpdateCheck => _autoUpdateCheck;
 
@@ -351,6 +357,18 @@ class FitnessProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Toggle the once-a-day daily brief on Home. Turning it on generates today's
+  /// brief right away (if due) rather than waiting for the next launch; turning
+  /// it off just stops future refreshes — the last cached brief is kept but
+  /// hidden. Independent of [saveAiCoachEnabled].
+  Future<void> saveAiBriefEnabled(bool value) async {
+    _aiBriefEnabled = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('ai_brief_enabled', value);
+    notifyListeners();
+    if (value) await refreshDailyBriefIfDue();
+  }
+
   Future<void> saveAiCoachMode(AiCoachMode mode) async {
     _aiCoachMode = mode;
     final prefs = await SharedPreferences.getInstance();
@@ -364,7 +382,7 @@ class FitnessProvider extends ChangeNotifier {
   /// cached brief (or null) without a call when cloud AI isn't configured or the
   /// coach is disabled. Safe to call on every launch.
   Future<String?> refreshDailyBriefIfDue() async {
-    if (!GeminiTextService.isConfigured || !_aiCoachEnabled) return _dailyBrief;
+    if (!GeminiTextService.isConfigured || !_aiBriefEnabled) return _dailyBrief;
     final prefs = await SharedPreferences.getInstance();
     final today = _todayKey;
     if (prefs.getString('ai_brief_date') == today &&
@@ -388,30 +406,57 @@ class FitnessProvider extends ChangeNotifier {
   /// manual "refresh" tap on the Home brief card. No-op when cloud AI isn't
   /// configured or the coach is off.
   Future<void> forceRefreshDailyBrief() async {
-    if (!GeminiTextService.isConfigured || !_aiCoachEnabled) return;
+    if (!GeminiTextService.isConfigured || !_aiBriefEnabled) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('ai_brief_date'); // invalidate today's cache
     await refreshDailyBriefIfDue();
   }
 
   String _dailyBriefSystemPrompt() =>
-      "You are $_userName's concise personal fitness coach (Indian context). "
-      'Write a short, friendly daily brief of 2-3 sentences (max ~45 words). '
-      'Focus on the ONE thing that matters most today — protein, calories, steps, '
-      'or water — and give a specific, encouraging nudge. Plain text only: no '
-      'markdown, no bullet lists.';
+      "You are $_userName's sharp, upbeat personal fitness coach (Indian "
+      'context — meals are Indian, weights in kg, goal is fat loss with muscle '
+      'retention). Write a daily brief of 3-4 short sentences (~55-75 words), '
+      'plain text only: no markdown, no bullet points, no headings. Make it feel '
+      'genuinely FRESH each day — vary how you open, react to what actually '
+      'changed since yesterday (praise a running streak, gently flag a slip), '
+      'then zero in on the SINGLE metric most off-track for this point in the '
+      'day and give one concrete, numeric action ("you\'re 38 g of protein '
+      'short — a scoop of whey plus curd covers most of it"). Prefer specific '
+      'foods/amounts over vague advice, stay warm and human, and close on a '
+      'short encouraging line. Never sound templated or repeat yesterday\'s '
+      'phrasing.';
 
-  String _dailyBriefUserPrompt() =>
-      'Today so far — calories ${todayCalories.round()}/$calorieGoal kcal, '
-      'protein ${todayProtein.round()}/$proteinGoal g, '
-      'water $todayWaterMl/$waterGoalMl ml, steps $todaySteps/$stepGoal. '
-      'Yesterday — calories ${yesterdayCal.round()} kcal, '
-      'protein ${yesterdayProtein.round()} g. '
-      'Calorie-deficit streak: $deficitStreak day(s). '
-      'Latest weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"}kg, '
-      'goal weight ${goalWeightKg.toStringAsFixed(0)}kg. '
-      'Acknowledge yesterday or the streak if notable, then give me today\'s '
-      'one nudge.';
+  String _dailyBriefUserPrompt() {
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final now = DateTime.now();
+    final tod = now.hour < 11
+        ? 'morning'
+        : now.hour < 16
+            ? 'midday'
+            : now.hour < 21
+                ? 'evening'
+                : 'night';
+    final calLeft = calorieGoal - todayCalories.round();
+    final protLeft = proteinGoal - todayProtein.round();
+    final waterLeft = waterGoalMl - todayWaterMl;
+    final stepsLeft = stepGoal - todaySteps;
+    String gap(int left, String unit, String over) =>
+        left > 0 ? '$left $unit to go' : (left < 0 ? '${-left} $over' : 'goal hit');
+    return 'Right now it is ${days[now.weekday - 1]} $tod. '
+        'Today so far — calories ${todayCalories.round()}/$calorieGoal kcal '
+        '(${gap(calLeft, 'kcal', 'kcal over')}), '
+        'protein ${todayProtein.round()}/$proteinGoal g '
+        '(${gap(protLeft, 'g', 'g over')}), '
+        'water $todayWaterMl/$waterGoalMl ml (${gap(waterLeft, 'ml', 'ml over')}), '
+        'steps $todaySteps/$stepGoal (${gap(stepsLeft, 'steps', 'steps over')}). '
+        'Yesterday — calories ${yesterdayCal.round()} kcal, '
+        'protein ${yesterdayProtein.round()} g. '
+        'Calorie-deficit streak: $deficitStreak day(s). '
+        'Latest weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"} kg, '
+        'goal ${goalWeightKg.toStringAsFixed(0)} kg. '
+        'Write my brief for this $tod — acknowledge yesterday or the streak if '
+        'notable, then the single most useful nudge for the rest of today.';
+  }
 
   Future<void> saveAutoUpdateCheck(bool value) async {
     _autoUpdateCheck = value;
@@ -1956,6 +2001,7 @@ class FitnessProvider extends ChangeNotifier {
     _aiCoachMode = prefs.getString('ai_coach_mode') == 'cloud'
         ? AiCoachMode.cloud
         : AiCoachMode.local;
+    _aiBriefEnabled = prefs.getBool('ai_brief_enabled') ?? true;
     // Restore today's cached daily brief (if generated earlier today).
     if (prefs.getString('ai_brief_date') == _todayKey) {
       _dailyBrief = prefs.getString('ai_brief_text');
@@ -2002,6 +2048,7 @@ class FitnessProvider extends ChangeNotifier {
     if (!prefs.containsKey('water_goal_ml')) await prefs.setInt('water_goal_ml', _waterGoalMl);
     if (!prefs.containsKey('step_goal'))    await prefs.setInt('step_goal',       _stepGoal);
     if (!prefs.containsKey('ai_coach_enabled')) await prefs.setBool('ai_coach_enabled', _aiCoachEnabled);
+    if (!prefs.containsKey('ai_brief_enabled')) await prefs.setBool('ai_brief_enabled', _aiBriefEnabled);
     if (!prefs.containsKey('auto_update_check')) await prefs.setBool('auto_update_check', _autoUpdateCheck);
 
     // Always reset today's data first (handles midnight day-change case)

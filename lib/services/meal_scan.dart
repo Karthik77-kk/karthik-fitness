@@ -2,11 +2,13 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../screens/meal_scan_result_screen.dart';
 import '../theme/app_tokens.dart';
 import 'gemini_vision_service.dart';
 import 'haptics.dart';
+import 'nav_router.dart';
 import 'scan_quota.dart';
 
 /// SharedPreferences flag: the user has agreed (once) to send meal photos to
@@ -104,6 +106,15 @@ Future<void> recoverLostMealScan(BuildContext context) async {
 
     final bytes = await file.readAsBytes();
     if (!context.mounted) return;
+    // Recovery runs on cold start / resume where the app is sitting on the Home
+    // tab (the scan's Activity was killed), so the progress dialog and results
+    // would otherwise appear over Home. Jump to the Food section first so the
+    // whole flow lands where the user actually started the scan.
+    try {
+      Provider.of<NavRouter>(context, listen: false).open('food');
+    } catch (_) {
+      // NavRouter not in the tree (focused widget tests) — routing is optional.
+    }
     await _analyzeAndShow(context, bytes, prefs);
   } finally {
     _recovering = false;

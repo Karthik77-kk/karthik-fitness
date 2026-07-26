@@ -219,11 +219,16 @@ class _HomeScreenState extends State<HomeScreen> {
                         ]),
                       ),
                       const SizedBox(height: 20),
-                      // Once-a-day cloud AI "daily brief" (only when generated).
-                      if (p.dailyBrief?.isNotEmpty ?? false) ...[
-                        _DailyBriefCard(text: p.dailyBrief!),
-                        const SizedBox(height: 20),
-                      ],
+                    ],
+
+                    // Once-a-day AI "daily brief" — independent of the chat
+                    // coach: it has its own Settings toggle, so it can stay on
+                    // even when chat is off. Shows only once today's brief has
+                    // been generated. Tapping opens chat only if the coach is on.
+                    if (p.aiBriefEnabled && (p.dailyBrief?.isNotEmpty ?? false)) ...[
+                      _DailyBriefCard(
+                          text: p.dailyBrief!, canOpenChat: p.aiCoachEnabled),
+                      const SizedBox(height: 20),
                     ],
 
                     // ── Getting-started card (shows until user logs weight, food, or workout) ─
@@ -2231,12 +2236,15 @@ class _MacroLegendRow extends StatelessWidget {
 // ── Daily AI brief (once-a-day cloud summary) ─────────────────────────────────
 class _DailyBriefCard extends StatelessWidget {
   final String text;
-  const _DailyBriefCard({required this.text});
+  /// Whether tapping the card opens AI chat. False when the chat coach is
+  /// disabled but the brief is still shown — then only the refresh button acts.
+  final bool canOpenChat;
+  const _DailyBriefCard({required this.text, this.canOpenChat = true});
 
   @override
   Widget build(BuildContext context) {
     return AppCard(
-      onTap: () => openChat(context),
+      onTap: canOpenChat ? () => openChat(context) : null,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       radius: 14,
       gradient: LinearGradient(
