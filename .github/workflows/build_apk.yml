@@ -723,9 +723,14 @@ jobs:
             flutter build apk --release "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
           elif [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
             echo "🩹 Silent patch → release ${{ steps.ver.outputs.release_version }}"
+            # NOTE: `shorebird patch` has NO --flutter-version option (unlike
+            # `shorebird release`). A patch inherits the exact Flutter revision
+            # of its target release automatically, so pinning it here is both
+            # invalid (exit 64 "Could not find an option named --flutter-version")
+            # and unnecessary. Everything after `--` is proxied to `flutter build`.
             shorebird patch android \
               --release-version="${{ steps.ver.outputs.release_version }}" \
-              --flutter-version=3.44.0 -- "${FLAGS[@]}"
+              -- "${FLAGS[@]}"
           else
             echo "📦 Full release (versionCode ${{ steps.ver.outputs.code }})"
             shorebird release android --artifact apk --flutter-version=3.44.0 -- \
