@@ -231,7 +231,10 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.44.0"
+          # 3.44.5+ is required by Shorebird's patch rollout/adoption system —
+          # a release built on an older Flutter can't report which patch a
+          # device is running, so patches never actually roll out (0 downloads).
+          flutter-version: "3.44.5"
           channel: stable
           cache: true
 
@@ -739,7 +742,7 @@ jobs:
               -- "${FLAGS[@]}"
           else
             echo "📦 Full release (versionCode ${{ steps.ver.outputs.code }})"
-            shorebird release android --artifact apk --flutter-version=3.44.0 -- \
+            shorebird release android --artifact apk --flutter-version=3.44.5 -- \
               "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
           fi
 
