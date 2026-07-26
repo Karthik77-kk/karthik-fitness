@@ -285,9 +285,9 @@ class FitnessProvider extends ChangeNotifier {
   String? get dailyBrief => _dailyBrief;
 
   /// The daily brief is independent of [aiCoachEnabled]: it appears on Home
-  /// (and refreshes once a day) even when the chat coach is switched off,
-  /// unless the user turns THIS off too. Defaults on so existing users keep it.
-  bool _aiBriefEnabled = true;
+  /// (and refreshes once a day) only when the user opts in via this switch —
+  /// off by default, and unaffected by the chat coach toggle either way.
+  bool _aiBriefEnabled = false;
   bool get aiBriefEnabled => _aiBriefEnabled;
 
   bool _autoUpdateCheck = true;
@@ -2001,7 +2001,7 @@ class FitnessProvider extends ChangeNotifier {
     _aiCoachMode = prefs.getString('ai_coach_mode') == 'cloud'
         ? AiCoachMode.cloud
         : AiCoachMode.local;
-    _aiBriefEnabled = prefs.getBool('ai_brief_enabled') ?? true;
+    _aiBriefEnabled = prefs.getBool('ai_brief_enabled') ?? false;
     // Restore today's cached daily brief (if generated earlier today).
     if (prefs.getString('ai_brief_date') == _todayKey) {
       _dailyBrief = prefs.getString('ai_brief_text');
