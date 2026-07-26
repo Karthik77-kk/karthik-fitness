@@ -789,7 +789,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onChanged: _cloudBusy
                       ? null
                       : (v) async {
-                          Haptics.selection();
+                          Haptics.impact();
                           await CloudBackupService.instance.setAutoBackup(v);
                           setState(() => _cloudAuto = v);
                         },
@@ -918,7 +918,7 @@ class _GoalDirectionTile extends StatelessWidget {
                     label: _label(d),
                     selected: d == current,
                     onTap: () {
-                      Haptics.selection();
+                      Haptics.tap();
                       context.read<FitnessProvider>().saveGoalDirection(d);
                     },
                   ),
@@ -989,7 +989,7 @@ class _HapticsTile extends StatelessWidget {
         activeThumbColor: AppColors.green,
         onChanged: (v) {
           context.read<FitnessProvider>().saveHapticsEnabled(v);
-          if (v) Haptics.selection(); // confirm ON with a tick
+          if (v) Haptics.impact(); // confirm ON with a clearly-felt tap
         },
       ),
     );
@@ -1402,7 +1402,7 @@ class _Tile extends StatelessWidget {
         onTap: onTap == null
             ? null
             : () {
-                Haptics.selection();
+                Haptics.tap();
                 onTap!();
               },
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1435,7 +1435,7 @@ class _AiCoachEnabledTile extends StatelessWidget {
         value: p.aiCoachEnabled,
         activeColor: const Color(0xFF30D158),
         onChanged: (v) {
-          Haptics.selection();
+          Haptics.impact();
           context.read<FitnessProvider>().saveAiCoachEnabled(v);
         },
       ),
@@ -1468,7 +1468,7 @@ class _AiBriefEnabledTile extends StatelessWidget {
         value: p.aiBriefEnabled,
         activeColor: const Color(0xFF40C8E0),
         onChanged: (v) {
-          Haptics.selection();
+          Haptics.impact();
           context.read<FitnessProvider>().saveAiBriefEnabled(v);
         },
       ),
@@ -1487,7 +1487,7 @@ class _AiCoachModeTile extends StatelessWidget {
     return Expanded(
       child: GestureDetector(
         onTap: () {
-          Haptics.selection();
+          Haptics.tap();
           context.read<FitnessProvider>().saveAiCoachMode(mode);
         },
         child: Container(
@@ -1622,7 +1622,7 @@ class _AiAutoLoadTile extends StatelessWidget {
         value: ai.autoLoad,
         activeColor: const Color(0xFF30D158),
         onChanged: (v) {
-          Haptics.selection();
+          Haptics.impact();
           context.read<OnDeviceAiService>().saveAutoLoad(v);
         },
       ),
@@ -1647,7 +1647,7 @@ class _AutoUpdateEnabledTile extends StatelessWidget {
         value: p.autoUpdateCheck,
         activeColor: const Color(0xFF30D158),
         onChanged: (v) {
-          Haptics.selection();
+          Haptics.impact();
           context.read<FitnessProvider>().saveAutoUpdateCheck(v);
         },
       ),
