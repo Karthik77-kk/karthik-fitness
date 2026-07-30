@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'backup_crypto.dart';
 
 /// Backs up / restores the app's data JSON to a shared private GitHub repo —
 /// one file per user, keyed by a chosen username + id (path
@@ -198,6 +199,9 @@ class CloudBackupService {
     }
     final path = filePathFor(u, id);
     final prefs = await SharedPreferences.getInstance();
+    // Encrypt on-device with a key derived from the secret id, so the shared
+    // private repo only ever stores ciphertext (health data is never plaintext).
+    final payload = await BackupCrypto.encrypt(jsonContent, id);
     // Always fetch the CURRENT remote sha right before writing — a cached sha
     // goes stale the moment another device backs up, which would 409/422 every
     // subsequent push. Updating requires the live sha; creating omits it.
@@ -205,7 +209,7 @@ class CloudBackupService {
 
     final body = <String, dynamic>{
       'message': 'K Fitness backup ($u) ${DateTime.now().toIso8601String()}',
-      'content': base64Encode(utf8.encode(jsonContent)),
+      'content': base64Encode(utf8.encode(payload)),
       // No 'branch' → GitHub writes to the repo's default branch (avoids a
       // main-vs-master mismatch for arbitrary test repos).
       if (sha != null) 'sha': sha,
@@ -236,7 +240,14 @@ class CloudBackupService {
         .timeout(_timeout);
     if (resp.statusCode == 404) return null;
     if (resp.statusCode != 200) throw Exception(errorFor(resp.statusCode));
-    return decodeContentField(jsonDecode(resp.body) as Map<String, dynamic>);
+    final stored = decodeContentField(jsonDecode(resp.body) as Map<String, dynamic>);
+    // Decrypt with the secret id. Legacy plaintext backups pass through
+    // unchanged; a wrong id / tampered blob throws a clear error.
+    try {
+      return await BackupCrypto.decrypt(stored, id);
+    } catch (_) {
+      throw Exception('Could not decrypt backup — check your secret id.');
+    }
   }
 
   /// Auto-backup hook: pushes [buildJson]'s result if cloud sync is configured,

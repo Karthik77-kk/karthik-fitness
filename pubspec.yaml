@@ -33,6 +33,7 @@ dependencies:
   open_filex: ^4.7.0
   mobile_scanner: ^7.2.0
   image_picker: ^1.1.2
+  cryptography: ^2.7.0   # AES-GCM + PBKDF2 for client-side cloud-backup encryption
 
 dev_dependencies:
   flutter_test:
@@ -50,14 +51,14 @@ flutter:
       fonts:
         - asset: assets/fonts/Inter.ttf
 
-# App launcher icon — generated from assets/icon/app_icon.png via:
-#   dart run flutter_launcher_icons
-# Adaptive icon (Android 8+) gets the device's rounded/squircle mask; the dark
-# background blends with the artwork's own dark frame.
+# App launcher icon — generated via:  dart run flutter_launcher_icons
+# Brand "k" mark in the app green (#30D158) on a warm off-white ground.
+# Adaptive icon (Android 8+): off-white background layer + transparent green-k
+# foreground (app_icon_fg.png), so the mark floats within the device's mask.
 flutter_launcher_icons:
   android: true
   ios: false
   image_path: "assets/icon/app_icon.png"
   min_sdk_android: 21
-  adaptive_icon_background: "#0A0A0B"
-  adaptive_icon_foreground: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#F3F1EA"
+  adaptive_icon_foreground: "assets/icon/app_icon_fg.png"
