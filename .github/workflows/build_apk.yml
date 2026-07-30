@@ -392,16 +392,14 @@ jobs:
               '    }',
               '}',
               '',
-              '// Shorebird release/patch prepends its own',
-              '// --target-platform=android-arm,android-arm64,android-x64 before the',
-              '// --target-platform android-arm64 we pass, so the Flutter Gradle plugin',
-              '// sees android-arm64 TWICE and stages arm64-v8a/libapp.so twice.',
-              '// Flutter 3.44.5+ stages JNI libs with a typed CopyFlutterJniLibsTask',
-              '// (a DefaultTask, one libapp.so per listed platform, no settable',
-              '// duplicatesStrategy), so the doubled arm64 aborts the build',
-              '// (Entry arm64-v8a/libapp.so is a duplicate). De-dupe targetPlatforms so',
-              '// each ABI is staged once. Older Flutter used a Copy task with no',
-              '// targetPlatforms property — there set duplicatesStrategy = EXCLUDE.',
+              '// Belt-and-suspenders against a duplicate arm64-v8a/libapp.so during',
+              '// JNI staging. The PRIMARY guard is not double-passing',
+              '// --target-platform to Shorebird (see the build step) so the target',
+              '// platforms stay distinct. Additionally: Flutter 3.44.5+ stages JNI',
+              '// libs with a typed CopyFlutterJniLibsTask (a DefaultTask with no',
+              '// settable duplicatesStrategy) that aborts if an ABI is listed twice,',
+              '// so de-dupe its targetPlatforms. Older Flutter used a Copy task',
+              '// instead — there set duplicatesStrategy = EXCLUDE.',
               'tasks.matching { it.name.startsWith("copyJniLibs") }.configureEach {',
               '    if (it.hasProperty("targetPlatforms")) {',
               '        if (it.targetPlatforms.isPresent()) {',
@@ -703,9 +701,16 @@ jobs:
         #             Dart, diffs it against that release, and uploads a tiny silent
         #             OTA patch to Shorebird. NO APK, NO GitHub release, NO version
         #             bump — every publish step below is gated to release mode.
-        # --target-platform android-arm64: single-ABI (Flutter-built libs); the
-        # AAR .so are stripped by the gradle packaging filter. --obfuscate/
-        # --split-debug-info: release hardening; symbols kept as a 1-day artifact.
+        # Single-ABI: the plain-dispatch validation build passes
+        # --target-platform android-arm64 directly (below). We deliberately keep
+        # it OUT of FLAGS: `shorebird release/patch` prepends its own
+        # --target-platform=android-arm,android-arm64,android-x64, so appending
+        # ours would list android-arm64 TWICE. Flutter 3.44.5's
+        # CopyFlutterJniLibsTask then stages arm64-v8a/libapp.so twice and aborts
+        # (it is a DefaultTask with no settable duplicatesStrategy). abiFilters
+        # "arm64-v8a" + the gradle packaging filter still ship an arm64-only APK
+        # either way. --obfuscate/--split-debug-info: release hardening; symbols
+        # kept as a 1-day artifact.
         # Secrets are base64-encoded so they aren't plaintext, grep-able strings in
         # the APK (decoded at runtime, e.g. GeminiVisionService._key). GitHub sets
         # CI=true so Shorebird runs non-interactively.
@@ -715,7 +720,7 @@ jobs:
           b64() { printf '%s' "$1" | base64 -w 0; }
           # base64 -w 0 values contain no spaces, so array elements stay intact.
           FLAGS=(
-            --target-platform android-arm64 --no-tree-shake-icons
+            --no-tree-shake-icons
             --obfuscate --split-debug-info=build/symbols
             --dart-define=HF_TOKEN_B64=$(b64 "${{ secrets.HF_TOKEN }}")
             --dart-define=FDC_API_KEY_B64=$(b64 "${{ secrets.FDC_API_KEY }}")
@@ -734,7 +739,9 @@ jobs:
             # identical flags but reserves no version. (Discovered 2026-07-24: a
             # dispatch that pre-registered 3.0.0+332 blocked the merge's release.)
             echo "🔎 Validation build (dispatch) — plain flutter build, no Shorebird release registered."
-            flutter build apk --release "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
+            # Plain flutter build has no Shorebird --target-platform prepend, so
+            # pass single-ABI arm64 here to keep the validation build fast/small.
+            flutter build apk --release --target-platform android-arm64 "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
           elif [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
             echo "🩹 Silent patch → release ${{ steps.ver.outputs.release_version }}"
             # NOTE: `shorebird patch` has NO --flutter-version option (unlike
