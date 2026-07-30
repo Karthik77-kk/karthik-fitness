@@ -576,64 +576,58 @@ jobs:
           cat android/app/build.gradle
           grep -q "signingConfigs.release" android/app/build.gradle && echo "✅ Release signing confirmed" || (echo "❌ Release signing MISSING — build will use debug key!" && exit 1)
 
-      - name: Generate adaptive + legacy launcher icons (black K on grey)
+      - name: Generate adaptive + legacy launcher icons (green k on off-white)
         run: |
           pip install Pillow --break-system-packages -q
           python3 - << 'PYEOF'
           import os
-          from PIL import Image, ImageDraw, ImageFont
-          GREY = (90, 90, 90, 255)   # flat neutral grey background
-          BLACK = (0, 0, 0, 255)     # the K
-          def load_font(px):
-              for fp in [
-                  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-                  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
-                  '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
-              ]:
-                  if os.path.exists(fp):
-                      return ImageFont.truetype(fp, px)
-              return None
-          def draw_k(img, frac):
-              # Regular-weight 'K' centered on img; frac = glyph size / canvas.
-              size = img.size[0]
-              draw = ImageDraw.Draw(img)
-              font = load_font(int(size * frac))
-              if font:
-                  b = draw.textbbox((0, 0), 'K', font=font)
-                  tw, th = b[2] - b[0], b[3] - b[1]
-                  draw.text(((size - tw) / 2 - b[0], (size - th) / 2 - b[1]), 'K', fill=BLACK, font=font)
-              else:
-                  m, s, cx = size * 0.34, max(size * 0.08, 2), size * 0.44
-                  draw.rectangle([m, m, m + s, size - m], fill=BLACK)
-                  draw.polygon([(cx, size*0.5), (cx+s*0.6, size*0.5), (size-m, m), (size-m-s, m)], fill=BLACK)
-                  draw.polygon([(cx, size*0.5), (cx+s*0.6, size*0.5), (size-m, size-m), (size-m-s, size-m)], fill=BLACK)
-              return img
+          from PIL import Image, ImageDraw
+          OFFWHITE = (243, 241, 234, 255)  # #F3F1EA warm off-white ground
+          GREEN = (48, 209, 88, 255)       # #30D158 app UI green
+          # Brand "k" mark: pennant stem + two wedges opening right
+          # (same geometry as assets/icon/app_icon.png).
+          STEM = [(28, 28), (40.5, 33), (40.5, 72), (28, 72)]
+          ARM = [(49, 28), (74, 28), (42.5, 50.5)]
+          LEG = [(46.5, 72), (74, 72), (42.5, 50.5)]
+          ART_W, ART_CX, ART_CY = 46.0, 51.0, 50.0  # mark bbox width + centre in 100-box
+          def draw_mark(size, frac, fill, bg):
+              # frac = mark width / canvas. Supersample 4x then downscale for smooth edges.
+              ss = 4
+              s = size * ss
+              img = Image.new('RGBA', (s, s), bg)
+              d = ImageDraw.Draw(img)
+              sc = (s * frac) / ART_W
+              tx = s / 2 - sc * ART_CX
+              ty = s / 2 - sc * ART_CY
+              for poly in (STEM, ARM, LEG):
+                  d.polygon([(tx + sc * x, ty + sc * y) for (x, y) in poly], fill=fill)
+              return img.resize((size, size), Image.LANCZOS)
           res = 'android/app/src/main/res'
-          # Legacy square icons (pre-API-26): full-bleed grey + K at 56%.
+          # Legacy square icons (pre-API-26): off-white ground + green mark at 46%.
           legacy = {'mipmap-mdpi': 48, 'mipmap-hdpi': 72, 'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144, 'mipmap-xxxhdpi': 192}
           for d, sz in legacy.items():
               p = res + '/' + d
               os.makedirs(p, exist_ok=True)
-              sq = draw_k(Image.new('RGBA', (sz, sz), GREY), 0.56).convert('RGB')
+              sq = draw_mark(sz, 0.46, GREEN, OFFWHITE).convert('RGB')
               sq.save(p + '/ic_launcher.png')
               sq.save(p + '/ic_launcher_round.png')
-          # Adaptive foreground (API 26+): transparent 108dp canvas, K at 42% so
-          # it stays inside the safe zone the launcher mask crops to.
+          # Adaptive foreground (API 26+): transparent canvas, mark at 44% so it
+          # stays inside the safe zone the launcher mask crops to.
           fg = {'mipmap-mdpi': 108, 'mipmap-hdpi': 162, 'mipmap-xhdpi': 216, 'mipmap-xxhdpi': 324, 'mipmap-xxxhdpi': 432}
           for d, sz in fg.items():
               p = res + '/' + d
               os.makedirs(p, exist_ok=True)
-              draw_k(Image.new('RGBA', (sz, sz), (0, 0, 0, 0)), 0.42).save(p + '/ic_launcher_foreground.png')
-          # Background colour + adaptive-icon XML (foreground over grey).
+              draw_mark(sz, 0.44, GREEN, (0, 0, 0, 0)).save(p + '/ic_launcher_foreground.png')
+          # Off-white background colour + adaptive-icon XML (green mark over off-white).
           os.makedirs(res + '/values', exist_ok=True)
           with open(res + '/values/colors.xml', 'w') as f:
-              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#5A5A5A</color>\n</resources>\n')
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#F3F1EA</color>\n</resources>\n')
           os.makedirs(res + '/mipmap-anydpi-v26', exist_ok=True)
           adaptive = '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/ic_launcher_background"/>\n    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n</adaptive-icon>\n'
           for name in ['ic_launcher.xml', 'ic_launcher_round.xml']:
               with open(res + '/mipmap-anydpi-v26/' + name, 'w') as f:
                   f.write(adaptive)
-          print('Adaptive + legacy launcher icons generated')
+          print('Green-k launcher icons generated (green on off-white)')
           PYEOF
 
       - name: Flutter pub get
