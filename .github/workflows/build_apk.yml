@@ -81,6 +81,29 @@ jobs:
             # Only files that actually go into / affect the APK matter here.
             APP_FILES=$(echo "$FILES" | grep -E '^(lib/|android/|assets/|pubspec\.(yaml|lock)$|\.github/workflows/build_apk\.yml$)' || true)
 
+            # build_apk.yml is BOTH the build recipe AND this gate's own CI
+            # plumbing, so its filename alone can't say whether an edit changes
+            # the APK. Resolve it dynamically: count it as an app change ONLY when
+            # its `build:` job (the part that actually produces the APK) differs
+            # from the previous commit. A detect-logic / comment / workflow-config
+            # edit leaves the APK byte-identical, so it auto-skips with no [skip]
+            # label needed. Comments and blank lines are ignored in the compare; a
+            # real build-step change still counts. Extraction failure falls back to
+            # treating it as an app change (safe).
+            CI_SELF='.github/workflows/build_apk.yml'
+            if echo "$FILES" | grep -qx "$CI_SELF"; then
+              build_job() {
+                git show "$1:$CI_SELF" 2>/dev/null \
+                  | awk '/^  build:/{f=1} f&&/^  [A-Za-z]/&&!/^  build:/{exit} f{print}' \
+                  | grep -vE '^[[:space:]]*(#|$)' || true
+              }
+              NEW_JOB=$(build_job "$AFTER")
+              if [ -n "$NEW_JOB" ] && [ "$(build_job "$BEFORE")" = "$NEW_JOB" ]; then
+                APP_FILES=$(echo "$APP_FILES" | grep -vx "$CI_SELF" || true)
+                echo "note: $CI_SELF changed but its build job is unchanged — APK unaffected, not counted as an app change"
+              fi
+            fi
+
             # Manual overrides via the merged PR's labels (Rule 23 — computed, but
             # you can force either way). Look up the PR(s) associated with this
             # merge commit; empty/permission-less lookup just means "no override".
