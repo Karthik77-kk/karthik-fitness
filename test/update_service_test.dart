@@ -59,6 +59,29 @@ void main() {
       expect(info.notes, contains('Feature A'));
     });
 
+    test('captures the kfit.patch asset size when present', () {
+      final info = UpdateService.parseLatest({
+        'tag_name': 'v2.3.280',
+        'body': '',
+        'assets': [
+          {'name': 'kfit.apk', 'browser_download_url': 'https://x/kfit.apk', 'size': 190000000},
+          {'name': 'kfit.patch', 'browser_download_url': 'https://x/kfit.patch', 'size': 17670},
+          {'name': 'patch.json', 'browser_download_url': 'https://x/patch.json', 'size': 362},
+        ],
+      });
+      expect(info, isNotNull);
+      expect(info!.sizeBytes, 190000000);
+      expect(info.patchUrl, 'https://x/kfit.patch');
+      expect(info.patchSizeBytes, 17670);
+    });
+
+    test('patchSizeBytes is 0 when the release ships no patch', () {
+      final info = UpdateService.parseLatest(makeRelease());
+      expect(info, isNotNull);
+      expect(info!.patchUrl, isNull);
+      expect(info.patchSizeBytes, 0);
+    });
+
     test('returns null when kfit.apk asset is missing', () {
       final info = UpdateService.parseLatest(makeRelease(assetName: 'other.apk'));
       expect(info, isNull);

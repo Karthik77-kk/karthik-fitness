@@ -1019,7 +1019,7 @@ jobs:
             echo "$CHANGES"
             echo ""
             echo "---"
-            echo "~${MB} MB · Requires Android 8.0+ · Includes on-device Gemma 3 AI model"
+            echo "~${MB} MB · Requires Android 8.0+"
             echo ""
             echo "### Install"
             echo "1. Download \`kfit.apk\` below"

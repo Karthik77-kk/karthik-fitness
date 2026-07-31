@@ -34,6 +34,11 @@ class AppUpdateInfo {
   final String? patchUrl;
   final String? patchMetaUrl;
 
+  /// Byte size of the `kfit.patch` delta asset (0 when the release ships no
+  /// patch). Lets the UI show the *actual* bytes a delta update downloads
+  /// (a few KB) instead of the full APK size when patching.
+  final int patchSizeBytes;
+
   const AppUpdateInfo({
     required this.tag,
     required this.build,
@@ -43,6 +48,7 @@ class AppUpdateInfo {
     required this.sizeBytes,
     this.patchUrl,
     this.patchMetaUrl,
+    this.patchSizeBytes = 0,
   });
 }
 
@@ -130,6 +136,14 @@ class UpdateService {
         return (u != null && u.isNotEmpty) ? u : null;
       }
 
+      int sizeOf(String name) {
+        final a = list.firstWhere(
+          (a) => (a['name'] as String?) == name,
+          orElse: () => const {},
+        );
+        return (a['size'] as int?) ?? 0;
+      }
+
       final asset = list.firstWhere(
         (a) => (a['name'] as String?) == _assetName,
         orElse: () => {},
@@ -148,6 +162,7 @@ class UpdateService {
         sizeBytes: (asset['size'] as int?) ?? 0,
         patchUrl: urlOf(_patchName),
         patchMetaUrl: urlOf(_patchMetaName),
+        patchSizeBytes: sizeOf(_patchName),
       );
     } catch (_) {
       return null;

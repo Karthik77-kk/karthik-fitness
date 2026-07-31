@@ -43,6 +43,25 @@ class _UpdateSheetState extends State<_UpdateSheet> {
   // 0.0–1.0 → live percentage for the full-APK fallback download.
   double? _downloadProgress;
 
+  // null → download path not yet decided; true → applying the small delta
+  // patch; false → downloading the full APK. Drives the size label so a delta
+  // shows its real (few-KB) size instead of the full ~180 MB APK size.
+  bool? _isDeltaPath;
+
+  // Bytes this update actually downloads: the small delta patch while on the
+  // patch path, else the full APK.
+  int get _activeBytes => (_isDeltaPath == true && widget.info.patchSizeBytes > 0)
+      ? widget.info.patchSizeBytes
+      : widget.info.sizeBytes;
+
+  // Human size of [_activeBytes]: KB under a megabyte (delta), else MB (full).
+  String get _sizeLabel {
+    final b = _activeBytes;
+    if (b <= 0) return '';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+    return '${(b / 1048576).toStringAsFixed(0)} MB';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -69,6 +88,10 @@ class _UpdateSheetState extends State<_UpdateSheet> {
     setState(() {
       _phase = _Phase.downloading;
       _downloadProgress = null; // delta attempt → indeterminate spinner
+      // Optimistic: a patch asset exists ⇒ we attempt (and usually use) the
+      // small delta, so show its size. Flips to full below if it falls back.
+      _isDeltaPath =
+          widget.info.patchUrl != null && widget.info.patchSizeBytes > 0;
       _error = null;
     });
     try {
@@ -79,7 +102,12 @@ class _UpdateSheetState extends State<_UpdateSheet> {
       if (file == null) {
         // No patch applies → download the full APK (~180 MB) with a live bar,
         // so a multi-minute download never looks frozen.
-        if (mounted) setState(() => _downloadProgress = 0);
+        if (mounted) {
+          setState(() {
+            _downloadProgress = 0;
+            _isDeltaPath = false; // full download → show full APK size
+          });
+        }
         file = await widget.service.downloadApk(
           widget.info,
           onProgress: (p) {
@@ -131,9 +159,7 @@ class _UpdateSheetState extends State<_UpdateSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final sizeMb = widget.info.sizeBytes > 0
-        ? '${(widget.info.sizeBytes / 1048576).toStringAsFixed(0)} MB'
-        : '';
+    final sizeLabel = _sizeLabel;
 
     return SafeArea(
       child: Container(
@@ -187,9 +213,9 @@ class _UpdateSheetState extends State<_UpdateSheet> {
                           fontSize: 13,
                           fontWeight: FontWeight.w600),
                     ),
-                    if (sizeMb.isNotEmpty) ...[
+                    if (sizeLabel.isNotEmpty) ...[
                       const SizedBox(width: 10),
-                      Text(sizeMb,
+                      Text(sizeLabel,
                           style: const TextStyle(
                               color: Color(0xFF8E8E93), fontSize: 12)),
                     ],

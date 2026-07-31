@@ -85,6 +85,19 @@ const _info = AppUpdateInfo(
   sizeBytes: 180 * 1048576,
 );
 
+// A release that also ships a small delta patch (18 KB).
+const _infoWithPatch = AppUpdateInfo(
+  tag: 'v3.0.400',
+  build: 400,
+  versionName: '3.0.400',
+  notes: '',
+  apkUrl: 'https://x/kfit.apk',
+  sizeBytes: 180 * 1048576,
+  patchUrl: 'https://x/kfit.patch',
+  patchMetaUrl: 'https://x/patch.json',
+  patchSizeBytes: 18 * 1024,
+);
+
 void main() {
   testWidgets('full-APK fallback shows a live percentage bar', (tester) async {
     final service = _FakeUpdateService()..emitProgress = 0.42;
@@ -114,5 +127,31 @@ void main() {
     service.deltaCompleter!.complete(File('${Directory.systemTemp.path}/y.apk'));
     await tester.pumpAndSettle();
     expect(find.text('Install now'), findsOneWidget);
+  });
+
+  testWidgets('delta path shows the small patch size, not the full APK size',
+      (tester) async {
+    final service = _FakeUpdateService()..deltaCompleter = Completer<File?>();
+    await _openSheet(tester, service, _infoWithPatch);
+
+    // Downloading only the 18 KB patch → the size label reflects that, not 180 MB.
+    expect(find.text('18 KB'), findsOneWidget);
+    expect(find.text('180 MB'), findsNothing);
+
+    service.deltaCompleter!.complete(File('${Directory.systemTemp.path}/z.apk'));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('full download shows the full APK size, not KB', (tester) async {
+    // deltaCompleter null → fake delta returns null → falls back to full download.
+    final service = _FakeUpdateService()..emitProgress = 0.42;
+    await _openSheet(tester, service, _infoWithPatch);
+
+    // On the full path the label flips back to the full APK size.
+    expect(find.text('180 MB'), findsOneWidget);
+    expect(find.textContaining('KB'), findsNothing);
+
+    service.downloadCompleter.complete(File('${Directory.systemTemp.path}/x.apk'));
+    await tester.pumpAndSettle();
   });
 }
