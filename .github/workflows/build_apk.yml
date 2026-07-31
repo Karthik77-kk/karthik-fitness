@@ -44,16 +44,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # HYBRID SHOREBIRD GATE. Three outcomes:
-          #   skip    — no app-relevant change (docs/website/tests only). No build.
-          #   patch   — Dart-ONLY change → `shorebird patch`: a tiny silent OTA applied
-          #             on next launch, no APK, no GitHub release, no version bump.
-          #   release — native/deps/assets/android/workflow change (or a manual run) →
-          #             full `shorebird release`: new APK + GitHub release (this is the
-          #             only path that can create a patch baseline).
-          # A patch can ONLY carry Dart; it rides on the installed release's identical
-          # native code, so the classification MUST be conservative — anything that is
-          # not purely under lib/ falls through to a full release.
+          # HYBRID SHOREBIRD GATE — from the ACTUAL changed files, pick the
+          # cheapest correct way to ship this merge. Three outcomes:
+          #   skip    — nothing that reaches the APK changed (docs, website,
+          #             tests, other CI). No build, no release, no user update.
+          #   patch   — the change is 100% Dart (lib/ only) → `shorebird patch`:
+          #             a tiny silent OTA applied on next launch. No APK, no
+          #             GitHub release, no version bump.
+          #   release — something a patch CANNOT carry changed (native/android,
+          #             bundled assets, pubspec dependencies, or this build
+          #             workflow) → full `shorebird release`: new APK + GitHub
+          #             release, and the baseline future patches diff against.
+          # Why the boundary is exactly "lib/ only": a patch replaces only the
+          # Dart AOT (libapp.so) and rides on the installed release's native code
+          # and assets, which it cannot change — Shorebird's own --allow-asset-diffs
+          # help states "asset changes cannot be included in a patch". So the
+          # classification is conservative by design: when in doubt, it releases.
+          # Overrides — labels on the merged PR, checked BEFORE the file scan:
+          #   [skip]         force skip  (a CI/comment-only change to this workflow)
+          #   [patch]        force patch (adding a PURE-Dart dependency — it compiles
+          #                  into the patch even though pubspec changed)
+          #   [full-release] force a full release
           BEFORE="${{ github.event.before }}"
           AFTER="${{ github.sha }}"
           ZERO="0000000000000000000000000000000000000000"
@@ -77,16 +88,28 @@ jobs:
                        --jq '.[].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
             echo "PR labels: ${LABELS:-<none>}"
 
-            if echo " $LABELS " | grep -q ' full-release '; then
+            # Explicit label overrides win (most specific first). [skip] lets a
+            # CI/comment-only change to this workflow avoid a needless release
+            # (and the "update available" prompt for a byte-identical app).
+            if echo " $LABELS " | grep -q ' skip '; then
+              MODE=skip;    echo "reason=forced by [skip] label"
+            elif echo " $LABELS " | grep -q ' full-release '; then
               MODE=release; echo "reason=forced by [full-release] label"
             elif echo " $LABELS " | grep -q ' patch '; then
               MODE=patch;   echo "reason=forced by [patch] label"
             elif [ -z "$APP_FILES" ]; then
-              MODE=skip;    echo "reason=no app-relevant files — skipping"
-            elif echo "$APP_FILES" | grep -qvE '^lib/'; then
-              MODE=release; echo "reason=native/deps/assets/android/workflow changed — full release"
+              MODE=skip;    echo "reason=no app-relevant files (docs/website/tests/other CI) — nothing to ship"
             else
-              MODE=patch;   echo "reason=Dart-only (all app changes under lib/) — silent patch"
+              # Everything under lib/ is Dart → patchable. List anything else that
+              # reaches the APK; if that list is empty the change is Dart-only.
+              UNPATCHABLE=$(echo "$APP_FILES" | grep -vE '^lib/' || true)
+              if [ -z "$UNPATCHABLE" ]; then
+                MODE=patch;   echo "reason=Dart-only (all app changes under lib/) — silent patch"
+              else
+                MODE=release
+                echo "reason=full release — a patch cannot carry these changes:"
+                echo "$UNPATCHABLE" | sed 's/^/  - /'
+              fi
             fi
           fi
 
