@@ -432,7 +432,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: const Text('Cancel', style: TextStyle(color: Color(0xFF8E8E93))),
               ),
               TextButton(
-                onPressed: () => Navigator.pop(context, true),
+                onPressed: () {
+                  Haptics.heavy(); // HIGH — overwrites all data
+                  Navigator.pop(context, true);
+                },
                 child: const Text('Restore', style: TextStyle(color: Color(0xFFFF453A))),
               ),
             ],
@@ -483,6 +486,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF30D158), foregroundColor: Colors.black),
             onPressed: () {
+              Haptics.impact();
               p.saveUserName(ctrl.text);
               Navigator.pop(context);
             },
@@ -530,6 +534,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF30D158), foregroundColor: Colors.black),
             onPressed: () async {
+              Haptics.impact();
               final parsed = int.tryParse(ctrl.text.trim());
               if (parsed != null) {
                 // Enforce the advertised range — an out-of-range goal (e.g. 0 or
@@ -1268,7 +1273,10 @@ class _AiStatusTile extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: () => context.read<OnDeviceAiService>().cancelDownload(),
+              onPressed: () {
+                Haptics.impact();
+                context.read<OnDeviceAiService>().cancelDownload();
+              },
               icon: const Icon(Icons.close, size: 16, color: Color(0xFFFF453A)),
               label: const Text('Cancel Download'),
               style: OutlinedButton.styleFrom(
@@ -1285,7 +1293,10 @@ class _AiStatusTile extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
-              onPressed: () => context.read<OnDeviceAiService>().downloadAndLoad(),
+              onPressed: () {
+                Haptics.impact();
+                context.read<OnDeviceAiService>().downloadAndLoad();
+              },
               icon: const Icon(Icons.refresh, size: 16),
               label: const Text('Retry Download'),
               style: FilledButton.styleFrom(
@@ -1302,7 +1313,10 @@ class _AiStatusTile extends StatelessWidget {
             width: double.infinity,
             child: ai.isReady
                 ? OutlinedButton.icon(
-                    onPressed: () => openChat(context),
+                    onPressed: () {
+                      Haptics.impact();
+                      openChat(context);
+                    },
                     icon: const Text('💬', style: TextStyle(fontSize: 14)),
                     label: const Text('Open AI Coach Chat'),
                     style: OutlinedButton.styleFrom(
@@ -1317,7 +1331,10 @@ class _AiStatusTile extends StatelessWidget {
                         padding: EdgeInsets.symmetric(vertical: 8),
                         child: CircularProgressIndicator(color: _kGreen, strokeWidth: 2)))
                     : FilledButton.icon(
-                        onPressed: () => context.read<OnDeviceAiService>().downloadAndLoad(),
+                        onPressed: () {
+                          Haptics.impact();
+                          context.read<OnDeviceAiService>().downloadAndLoad();
+                        },
                         icon: const Icon(Icons.download_rounded, size: 16),
                         label: const Text('Download AI Model (~600 MB)',
                             style: TextStyle(fontWeight: FontWeight.w700)),
@@ -1397,12 +1414,14 @@ class _Tile extends StatelessWidget {
         trailing: trailing ?? (onTap != null
             ? const Icon(Icons.chevron_right, color: Color(0xFF8E8E93))
             : null),
-        // A light tick on every tappable settings row (respects the global
-        // haptics toggle — a no-op when the user has switched haptics off).
+        // A firm tick on every tappable settings row. mediumImpact, not
+        // lightImpact: a light tap is imperceptible on many Android devices, so
+        // rows felt "dead" next to the switches (which already use impact).
+        // Respects the global haptics toggle — a no-op when haptics are off.
         onTap: onTap == null
             ? null
             : () {
-                Haptics.tap();
+                Haptics.impact();
                 onTap!();
               },
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1581,7 +1600,10 @@ class _CloudCoachInfoTile extends StatelessWidget {
         SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
-            onPressed: () => openChat(context),
+            onPressed: () {
+              Haptics.impact();
+              openChat(context);
+            },
             icon: const Text('💬', style: TextStyle(fontSize: 14)),
             label: const Text('Open AI Coach Chat'),
             style: OutlinedButton.styleFrom(
@@ -1715,7 +1737,12 @@ class _CheckForUpdatesTileState extends State<_CheckForUpdatesTile> {
           trailing: _checking
               ? null
               : const Icon(Icons.chevron_right, color: Color(0xFF8E8E93)),
-          onTap: _checking ? null : _check,
+          onTap: _checking
+              ? null
+              : () {
+                  Haptics.impact();
+                  _check();
+                },
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         ),

@@ -17,20 +17,27 @@ abstract final class Haptics {
   /// `'haptics_enabled'` setting; defaults to on.
   static bool enabled = true;
 
-  /// Discrete selection change — tab switch, chip pick, segment toggle, stepper
-  /// tick, picker scroll.
+  // Three deliberate intensity tiers (Android renders selectionClick as almost
+  // nothing, so LOW uses lightImpact instead):
+  //   LOW    (lightImpact)  — scrolling, boundaries, discrete selections.
+  //   MEDIUM (mediumImpact) — the default for taps: rows, switches, buttons.
+  //   HIGH   (heavyImpact)  — important / destructive: reset, delete, wipe.
+
+  /// LOW tier — discrete selection change (tab switch, chip pick, segment
+  /// toggle, stepper tick, picker/scroll tick).
   static void selection() {
     if (!enabled) return;
-    HapticFeedback.selectionClick();
+    HapticFeedback.lightImpact();
   }
 
-  /// A light tap — buttons, list-row taps, adding a single item, +/− steppers.
+  /// LOW tier — a light tap (minor, frequent touches).
   static void tap() {
     if (!enabled) return;
     HapticFeedback.lightImpact();
   }
 
-  /// A medium tap — primary actions (log a workout, "Add all", save a goal).
+  /// MEDIUM tier — the standard felt tap for most interactions (list rows,
+  /// switches, buttons, primary actions like logging a workout or saving a goal).
   static void impact() {
     if (!enabled) return;
     HapticFeedback.mediumImpact();
@@ -42,22 +49,24 @@ abstract final class Haptics {
     HapticFeedback.mediumImpact();
   }
 
-  /// A stronger cue — destructive confirms, notable milestones, tamper block.
+  /// HIGH tier — a strong cue for important / destructive actions (reset,
+  /// delete, wipe data, notable milestones, tamper block).
   static void heavy() {
     if (!enabled) return;
     HapticFeedback.heavyImpact();
   }
 
-  /// Warning/error pulse — invalid input, a blocked or exhausted action.
+  /// HIGH tier — warning/error pulse (invalid input, a blocked or exhausted
+  /// action).
   static void warning() {
     if (!enabled) return;
     HapticFeedback.heavyImpact();
   }
 
-  /// A subtle boundary tick — reaching the top/bottom of a scroll view.
+  /// LOW tier — a subtle boundary tick (reaching the top/bottom of a scroll).
   static void edge() {
     if (!enabled) return;
-    HapticFeedback.selectionClick();
+    HapticFeedback.lightImpact();
   }
 }
 
