@@ -114,7 +114,7 @@ class NotificationsScreen extends StatelessWidget {
         color: _kOrange,
         title: 'No meals logged today',
         body: 'Log your food — even rough estimates keep you on track and '
-            'feed the AI coach with better patterns.',
+            'feed the coach with better patterns.',
       ));
     }
 
@@ -245,8 +245,10 @@ class _MorningBriefSection extends StatelessWidget {
   }
 
   String _greeting(int hour) {
+    if (hour < 5) return 'Good evening,'; // 12am–4:59am — never "morning"
     if (hour < 12) return 'Good morning,';
-    return 'Hey,';
+    if (hour < 17) return 'Good afternoon,';
+    return 'Good evening,';
   }
 
   String _focusTip(FitnessProvider p) {
@@ -270,13 +272,13 @@ class _MorningBriefSection extends StatelessWidget {
     }
     if (calAdh > 0 && calAdh < 0.5) {
       return 'Today\'s focus: calories. You\'re hitting your ${p.calorieGoal} kcal target about '
-          '${(calAdh * 100).round()}% of days. Log meals early so the AI can guide you.';
+          '${(calAdh * 100).round()}% of days. Log meals early so the coach can guide you.';
     }
     if (p.wantsDeficit && p.deficitStreak >= 3) {
       return '${p.deficitStreak}-day deficit streak — great momentum. Stay consistent and protect that protein.';
     }
     return 'Hit ${p.calorieGoal} kcal, ${p.proteinGoal}g protein and ${(p.waterGoalMl / 1000).toStringAsFixed(1)} L water. '
-        'Log everything — your data makes the AI coaching smarter.';
+        'Log everything — your data makes the coaching smarter.';
   }
 
   String _fmtDate(DateTime d) {

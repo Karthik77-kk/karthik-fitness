@@ -180,7 +180,7 @@ class _ChatScreenState extends State<ChatScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         title: Text(
-          _session.title == 'New Chat' ? 'AI Coach' : _session.title,
+          _session.title == 'New Chat' ? 'Coach' : _session.title,
           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
@@ -294,7 +294,7 @@ class _SetupView extends StatelessWidget {
       child: Column(children: [
         const Icon(Icons.auto_awesome_rounded, size: 52, color: _kGreen),
         const SizedBox(height: 16),
-        const Text('On-Device AI Coach',
+        const Text('On-Device Coach',
             style: TextStyle(color: Colors.white, fontSize: 20,
                 fontWeight: FontWeight.w700)),
         const SizedBox(height: 8),
@@ -314,7 +314,7 @@ class _SetupView extends StatelessWidget {
           child: FilledButton.icon(
             onPressed: ai.downloadAndLoad,
             icon: const Icon(Icons.download_rounded),
-            label: const Text('Download & Enable AI Chat'),
+            label: const Text('Download & Enable Chat'),
             style: FilledButton.styleFrom(
               backgroundColor: _kGreen,
               foregroundColor: Colors.black,
@@ -507,7 +507,7 @@ class _ChatView extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           color: const Color(0xFF1E1E22),
           child: const Text(
-            '📝 History shown above. AI starts fresh — it does not remember prior turns.',
+            '📝 History shown above. The coach starts fresh — it does not remember prior turns.',
             textAlign: TextAlign.center,
             style: TextStyle(color: Color(0xFF8E8E93), fontSize: 11),
           ),
@@ -557,7 +557,8 @@ class _WelcomePrompts extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
       children: [
-        const Text('👋', style: TextStyle(fontSize: 40), textAlign: TextAlign.center),
+        const Center(
+            child: Icon(Icons.auto_awesome_rounded, size: 44, color: _kGreen)),
         const SizedBox(height: 10),
         const Text('Ask anything about your fitness data',
             textAlign: TextAlign.center,

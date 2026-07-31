@@ -47,6 +47,12 @@ void main() async {
         systemNavigationBarIconBrightness: Brightness.light,
       ));
 
+      // Portrait-only, like Instagram. Every screen — rings, charts, the camera
+      // scan flow — is laid out for one-handed portrait use; landscape would just
+      // stretch it awkwardly. Locked here once at startup for the whole app.
+      SystemChrome.setPreferredOrientations(
+          const [DeviceOrientation.portraitUp]);
+
       // Warm the bundled offline Indian food source (IFCT 2017) into memory so
       // the Add-Food search has it ready. Fire-and-forget — failure is non-fatal
       // (curated DB + remote sources still work) and the Add-Food sheet re-awaits

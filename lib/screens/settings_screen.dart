@@ -662,7 +662,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 20),
 
           // ── AI COACH ──────────────────────────────────────────────
-          _Header('AI Coach'),
+          _Header('Coach'),
           _AiCoachEnabledTile(),
           // Daily brief has its own switch — it stays available even with the
           // chat coach off. Only meaningful when a cloud key powers it.
@@ -859,6 +859,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 onTap: null,
               );
             },
+          ),
+          const SizedBox(height: 14),
+          Center(
+            child: Text(
+              'Meal scan & coach powered by Google Gemini',
+              style: TextStyle(
+                  color: const Color(0xFF8E8E93).withValues(alpha: 0.8),
+                  fontSize: 11),
+            ),
           ),
           const SizedBox(height: 32),
         ],
@@ -1220,13 +1229,13 @@ class _AiStatusTile extends StatelessWidget {
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          const Text('🤖', style: TextStyle(fontSize: 20)),
+          const Icon(Icons.auto_awesome_rounded, size: 20, color: _kGreen),
           const SizedBox(width: 10),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Gemma 3 1B  ·  ~600 MB  ·  offline',
                 style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
             Text(ai.isReady ? 'Ready — tap to chat' : ai.state == AiModelState.notInstalled
-                ? 'Download once over Wi-Fi to enable AI chat'
+                ? 'Download once over Wi-Fi to enable chat'
                 : ai.state == AiModelState.downloading ? 'Downloading…'
                 : ai.state == AiModelState.loading ? 'Loading model…'
                 : 'Error',
@@ -1311,7 +1320,7 @@ class _AiStatusTile extends StatelessWidget {
                       openChat(context);
                     },
                     icon: const Text('💬', style: TextStyle(fontSize: 14)),
-                    label: const Text('Open AI Coach Chat'),
+                    label: const Text('Open Coach Chat'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: _kGreen,
                       side: const BorderSide(color: _kGreen),
@@ -1329,7 +1338,7 @@ class _AiStatusTile extends StatelessWidget {
                           context.read<OnDeviceAiService>().downloadAndLoad();
                         },
                         icon: const Icon(Icons.download_rounded, size: 16),
-                        label: const Text('Download AI Model (~600 MB)',
+                        label: const Text('Download Model (~600 MB)',
                             style: TextStyle(fontWeight: FontWeight.w700)),
                         style: FilledButton.styleFrom(
                           backgroundColor: _kGreen,
@@ -1435,8 +1444,8 @@ class _AiCoachEnabledTile extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        secondary: const Icon(Icons.smart_toy_rounded, color: Color(0xFF30D158)),
-        title: const Text('Enable AI Coach',
+        secondary: const Icon(Icons.auto_awesome_rounded, color: Color(0xFF30D158)),
+        title: const Text('Enable Coach',
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
         subtitle: Text(
           p.aiCoachEnabled
@@ -1469,7 +1478,7 @@ class _AiBriefEnabledTile extends StatelessWidget {
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         secondary:
             const Icon(Icons.auto_awesome_rounded, color: Color(0xFF40C8E0)),
-        title: const Text('Daily AI brief',
+        title: const Text('Daily brief',
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
         subtitle: Text(
           p.aiBriefEnabled
@@ -1587,7 +1596,7 @@ class _CloudCoachInfoTile extends StatelessWidget {
         const SizedBox(height: 6),
         const Text(
             'Fast responses via ${GeminiTextService.modelLabel} — no 600 MB '
-            'download. Needs internet; also powers a once-a-day AI daily brief.',
+            'download. Needs internet; also powers a once-a-day daily brief.',
             style: TextStyle(color: Color(0xFF8E8E93), fontSize: 11, height: 1.35)),
         const SizedBox(height: 12),
         SizedBox(
@@ -1598,7 +1607,7 @@ class _CloudCoachInfoTile extends StatelessWidget {
               openChat(context);
             },
             icon: const Text('💬', style: TextStyle(fontSize: 14)),
-            label: const Text('Open AI Coach Chat'),
+            label: const Text('Open Coach Chat'),
             style: OutlinedButton.styleFrom(
               foregroundColor: _green,
               side: const BorderSide(color: _green),
@@ -1626,12 +1635,12 @@ class _AiAutoLoadTile extends StatelessWidget {
       child: SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         secondary: const Icon(Icons.bolt_rounded, color: Color(0xFF30D158)),
-        title: const Text('Load AI at app start',
+        title: const Text('Load coach at app start',
             style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
         subtitle: Text(
           ai.autoLoad
-              ? 'AI is ready before you open it'
-              : 'AI loads only when you open AI Coach',
+              ? 'Coach is ready before you open it'
+              : 'Coach loads only when you open it',
           style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
         ),
         value: ai.autoLoad,

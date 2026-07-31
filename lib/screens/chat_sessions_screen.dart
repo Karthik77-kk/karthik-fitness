@@ -83,7 +83,7 @@ class _ChatSessionsScreenState extends State<ChatSessionsScreen> {
       backgroundColor: _kBg,
       appBar: AppBar(
         backgroundColor: _kBg,
-        title: const Text('AI Coach',
+        title: const Text('Coach',
             style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
         actions: [
           // Model status chip
@@ -130,9 +130,9 @@ class _ChatSessionsScreenState extends State<ChatSessionsScreen> {
                 if (_sessions.isEmpty)
                   const SliverFillRemaining(
                     child: AppEmptyState(
-                      icon: '🤖',
+                      icon: '💬',
                       title: 'No conversations yet',
-                      subtitle: 'Tap "New Chat" to ask your AI fitness coach anything.',
+                      subtitle: 'Tap "New Chat" to ask your fitness coach anything.',
                     ),
                   )
                 else ...[
@@ -255,12 +255,12 @@ class _AiStatusBanner extends StatelessWidget {
     final isDownloading = ai.state == AiModelState.downloading;
     final isLoading     = ai.state == AiModelState.loading;
     final msg = isDownloading
-        ? 'Downloading AI model… ${(ai.dlProgress * 100).round()}% (${(ai.dlProgress * 600).round()} / ~600 MB)'
+        ? 'Downloading coach… ${(ai.dlProgress * 100).round()}% (${(ai.dlProgress * 600).round()} / ~600 MB)'
         : isLoading
-          ? 'Loading AI model into memory…'
+          ? 'Loading coach into memory…'
           : ai.state == AiModelState.error
-            ? 'AI model error: ${ai.errorMessage}'
-            : 'AI model not installed — tap New Chat to download.';
+            ? 'Coach error: ${ai.errorMessage}'
+            : 'Coach not installed — tap New Chat to download.';
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),

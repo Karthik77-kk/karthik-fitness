@@ -142,7 +142,7 @@ Schema: [{"name":string,"grams":number,"kcal":number,"protein_g":number,"carb_g"
   /// Throws [GeminiException] with a user-safe message on failure.
   static Future<List<ScannedFood>> analyze(Uint8List jpegBytes) async {
     if (!isConfigured) {
-      throw const GeminiException('AI photo analysis isn\'t set up in this build.');
+      throw const GeminiException('Photo scan isn\'t set up in this build.');
     }
     final uri = Uri.parse(
       'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_key',
@@ -182,10 +182,10 @@ Schema: [{"name":string,"grams":number,"kcal":number,"protein_g":number,"carb_g"
     }
 
     if (resp.statusCode == 429) {
-      throw const GeminiException('AI is busy right now. Please try again in a minute.');
+      throw const GeminiException('The scanner is busy right now. Please try again in a minute.');
     }
     if (resp.statusCode == 400 || resp.statusCode == 403) {
-      throw const GeminiException('AI photo analysis is unavailable (key/quota issue).');
+      throw const GeminiException('Photo scan is unavailable (key/quota issue).');
     }
     if (resp.statusCode != 200) {
       throw GeminiException('Analysis failed (${resp.statusCode}). Try again.');

@@ -168,7 +168,7 @@ class _MealScanResultScreenState extends State<MealScanResultScreen> {
         macrosKnown: true,
         mealType: _meal,
         timestamp: DateTime.now(),
-        servingNote: grams > 0 ? '~${grams.round()} g · AI scan' : 'AI scan',
+        servingNote: grams > 0 ? '~${grams.round()} g · photo scan' : 'photo scan',
       ));
       added++;
     }

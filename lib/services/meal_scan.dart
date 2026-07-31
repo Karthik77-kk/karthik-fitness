@@ -37,7 +37,7 @@ bool _recovering = false;
 /// analysis → editable results.
 Future<void> startMealScan(BuildContext context) async {
   if (!GeminiVisionService.isConfigured) {
-    _snack(context, "AI photo scan isn't available in this build.");
+    _snack(context, "Photo scan isn't available in this build.");
     return;
   }
   final prefs = await SharedPreferences.getInstance();
@@ -287,7 +287,7 @@ void _showExhausted(BuildContext context) {
       backgroundColor: AppColors.surface3,
       title: const Text("You've used today's scans"),
       content: Text(
-        'AI meal scan is limited to ${ScanQuota.dailyLimit} photos per day. '
+        'Meal scan is limited to ${ScanQuota.dailyLimit} photos per day. '
         'Your credits reset tomorrow — meanwhile you can still add food manually.',
         style: const TextStyle(color: AppColors.muted, height: 1.5),
       ),

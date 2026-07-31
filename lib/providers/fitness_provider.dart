@@ -415,16 +415,17 @@ class FitnessProvider extends ChangeNotifier {
   String _dailyBriefSystemPrompt() =>
       "You are $_userName's sharp, upbeat personal fitness coach (Indian "
       'context — meals are Indian, weights in kg, goal is fat loss with muscle '
-      'retention). Write a daily brief of 3-4 short sentences (~55-75 words), '
-      'plain text only: no markdown, no bullet points, no headings. Make it feel '
-      'genuinely FRESH each day — vary how you open, react to what actually '
-      'changed since yesterday (praise a running streak, gently flag a slip), '
-      'then zero in on the SINGLE metric most off-track for this point in the '
-      'day and give one concrete, numeric action ("you\'re 38 g of protein '
-      'short — a scoop of whey plus curd covers most of it"). Prefer specific '
-      'foods/amounts over vague advice, stay warm and human, and close on a '
-      'short encouraging line. Never sound templated or repeat yesterday\'s '
-      'phrasing.';
+      'retention). Using the live stats provided, write a daily brief of 4-5 '
+      'short sentences (~70-100 words), plain text only: no markdown, no bullet '
+      'points, no headings. Make it feel genuinely FRESH each day — vary how you '
+      'open, react to what actually changed since yesterday AND to the 7-day '
+      'trend (praise a streak or an improving number, gently flag a slip), then '
+      'zero in on the SINGLE metric most off-track for this point in the day and '
+      'give one concrete, numeric action ("you\'re 38 g of protein short — a '
+      'scoop of whey plus curd covers most of it"). Prefer specific Indian '
+      'foods/amounts over vague advice, weave in the weight trend or ETA to goal '
+      'when notable, stay warm and human, and close on a short forward-looking '
+      "line. Never sound templated or repeat yesterday's phrasing.";
 
   String _dailyBriefUserPrompt() {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -442,20 +443,45 @@ class FitnessProvider extends ChangeNotifier {
     final stepsLeft = stepGoal - todaySteps;
     String gap(int left, String unit, String over) =>
         left > 0 ? '$left $unit to go' : (left < 0 ? '${-left} $over' : 'goal hit');
-    return 'Right now it is ${days[now.weekday - 1]} $tod. '
-        'Today so far — calories ${todayCalories.round()}/$calorieGoal kcal '
+    int pct(double r) => (r * 100).round();
+
+    final b = StringBuffer();
+    b.write('Right now it is ${days[now.weekday - 1]} $tod. ');
+    b.write('Today so far — calories ${todayCalories.round()}/$calorieGoal kcal '
         '(${gap(calLeft, 'kcal', 'kcal over')}), '
-        'protein ${todayProtein.round()}/$proteinGoal g '
-        '(${gap(protLeft, 'g', 'g over')}), '
+        'protein ${todayProtein.round()}/$proteinGoal g (${gap(protLeft, 'g', 'g over')}), '
         'water $todayWaterMl/$waterGoalMl ml (${gap(waterLeft, 'ml', 'ml over')}), '
-        'steps $todaySteps/$stepGoal (${gap(stepsLeft, 'steps', 'steps over')}). '
-        'Yesterday — calories ${yesterdayCal.round()} kcal, '
-        'protein ${yesterdayProtein.round()} g. '
-        'Calorie-deficit streak: $deficitStreak day(s). '
-        'Latest weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"} kg, '
-        'goal ${goalWeightKg.toStringAsFixed(0)} kg. '
-        'Write my brief for this $tod — acknowledge yesterday or the streak if '
-        'notable, then the single most useful nudge for the rest of today.';
+        'steps $todaySteps/$stepGoal (${gap(stepsLeft, 'steps', 'steps over')}). ');
+    b.write('Workouts today: ${todayWorkouts.length}; this week: '
+        '$weeklyWorkoutDays day(s)'
+        '${workoutStreak > 0 ? ', $workoutStreak-day workout streak' : ''}. ');
+    b.write('Yesterday — calories ${yesterdayCal.round()} kcal, '
+        'protein ${yesterdayProtein.round()} g. ');
+    b.write('7-day adherence — calories ${pct(calorieAdherenceRate)}%, '
+        'protein ${pct(proteinAdherenceRate)}%, water ${pct(waterAdherenceRate)}%; '
+        '7-day avg intake ${weeklyAvgCalories.round()} kcal. ');
+    b.write('Calorie-deficit streak: $deficitStreak day(s). ');
+    b.write('Weight ${latestWeightKg?.toStringAsFixed(1) ?? "?"} kg → '
+        'goal ${goalWeightKg.toStringAsFixed(0)} kg');
+    final trend = weeklyWeightChange;
+    if (trend != null) {
+      b.write(', trending ${trend >= 0 ? '+' : ''}${trend.toStringAsFixed(2)} kg/wk');
+    }
+    final wk = weeksToGoal;
+    if (wk != null) b.write(', ~${wk.round()} wk to goal');
+    b.write('. ');
+    final t = bestTdee;
+    final tgt = recommendedCalorieGoal;
+    if (t != null && tgt != null) {
+      b.write('Maintenance ~${t.round()} kcal, recommended target ~${tgt.round()} kcal. ');
+    }
+    final bf = navyBodyFatPercent;
+    if (bf != null) b.write('Body fat ~${bf.toStringAsFixed(0)}% (Navy method). ');
+    b.write('Write my brief for this $tod: open freshly (not a generic '
+        'greeting), highlight one thing trending well and the single metric most '
+        'off-track right now, then one concrete numeric action to fix it before '
+        'the day ends.');
+    return b.toString();
   }
 
   Future<void> saveAutoUpdateCheck(bool value) async {
@@ -1166,6 +1192,47 @@ class FitnessProvider extends ChangeNotifier {
     if (r == null) return (label: '—', color: _bcMuted);
     if (r < 0.5) return (label: 'Healthy', color: _bcGreen);
     if (r < 0.6) return (label: 'Raised', color: _bcOrange);
+    return (label: 'High', color: _bcRed);
+  }
+
+  /// Body-fat % via the U.S. Navy circumference method — a decent estimate from
+  /// a tape measure alone, for when there's no smart scale. Uses neck + waist
+  /// (plus hips for women) and height, all in cm. Returns null until the needed
+  /// measurements exist, or when the inputs are physically impossible (neck ≥
+  /// waist). Clamped to a sane 2–60 % so a mis-read tape can't show an absurd
+  /// number.
+  double? get navyBodyFatPercent {
+    final m = latestMeasurements;
+    final waist = m?.waistCm;
+    final neck = m?.neckCm;
+    final h = _heightCm;
+    if (waist == null || neck == null || h <= 0) return null;
+    double log10(double x) => math.log(x) / math.ln10;
+    double bf;
+    if (_isMale) {
+      final d = waist - neck;
+      if (d <= 0) return null;
+      bf = 495 / (1.0324 - 0.19077 * log10(d) + 0.15456 * log10(h)) - 450;
+    } else {
+      final hips = m?.hipsCm;
+      if (hips == null) return null;
+      final d = waist + hips - neck;
+      if (d <= 0) return null;
+      bf = 495 / (1.29579 - 0.35004 * log10(d) + 0.22100 * log10(h)) - 450;
+    }
+    if (bf.isNaN || bf.isInfinite) return null;
+    return bf.clamp(2, 60).toDouble();
+  }
+
+  /// Health band for [navyBodyFatPercent]. Women carry ~8–10 pts more essential
+  /// fat, so the "fit"/"average" ceilings shift up when not male.
+  ({String label, Color color}) get navyBodyFatStatus {
+    final bf = navyBodyFatPercent;
+    if (bf == null) return (label: '—', color: _bcMuted);
+    final fitCeil = _isMale ? 18.0 : 26.0;
+    final avgCeil = _isMale ? 25.0 : 32.0;
+    if (bf < fitCeil) return (label: 'Fit', color: _bcGreen);
+    if (bf < avgCeil) return (label: 'Average', color: _bcOrange);
     return (label: 'High', color: _bcRed);
   }
 
@@ -2737,18 +2804,25 @@ class FitnessProvider extends ChangeNotifier {
   DateTime? get estimatedGoalDate {
     final reg = _weightRegression;
     final w = latestWeightKg;
-    if (reg == null || w == null) return null;
-    if (reg.slope >= 0 && w > _goalWeightKg) return null;
-    final entries = getRecentBodyEntries(days: 90);
-    if (entries.isEmpty) return null;
-    final first = entries.first.date.millisecondsSinceEpoch.toDouble();
-    final today = DateTime.now().millisecondsSinceEpoch.toDouble();
-    final x0 = (today - first) / 86400000.0;
-    if (reg.slope == 0) return null;
-    final xGoal = (_goalWeightKg - reg.intercept) / reg.slope;
-    final daysToGoal = xGoal - x0;
-    if (daysToGoal < 0 || daysToGoal > 730) return null;
+    if (reg == null || w == null || reg.slope == 0) return null;
+    // Project from the *actual* latest weight along the measured trend. This
+    // keeps the ETA consistent with both the "Now" figure on the forecast card
+    // and the body screen's weeks-to-goal (which counts down from the same
+    // latest weight). Anchoring on the regression's fitted "today" value instead
+    // let the two disagree by weeks whenever the last log sat off the trend line.
+    final daysToGoal = (_goalWeightKg - w) / reg.slope;
+    if (daysToGoal <= 0 || daysToGoal > 730) return null;
     return DateTime.now().add(Duration(days: daysToGoal.round()));
+  }
+
+  /// True when there's enough *recent* weight history to draw an honest
+  /// forecast: ≥5 logs in the last 90 days AND the newest within a month. Older
+  /// data makes the regression extrapolate a stale trend and leaves the 30-day
+  /// history line empty, so the whole forecast is hidden rather than shown blank.
+  bool get hasFreshWeightForecast {
+    final entries = getRecentBodyEntries(days: 90);
+    if (entries.length < 5) return false;
+    return DateTime.now().difference(entries.last.date).inDays <= 30;
   }
 
   Future<void> saveAge(int years) async {

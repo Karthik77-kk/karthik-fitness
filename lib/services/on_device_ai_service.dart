@@ -614,9 +614,13 @@ class OnDeviceAiService extends ChangeNotifier {
         if (latest.chestCm     != null) ps.add('chest ${latest.chestCm!.toStringAsFixed(0)}cm');
         if (latest.waistCm     != null) ps.add('waist ${latest.waistCm!.toStringAsFixed(0)}cm');
         if (latest.hipsCm      != null) ps.add('hips ${latest.hipsCm!.toStringAsFixed(0)}cm');
+        if (latest.neckCm      != null) ps.add('neck ${latest.neckCm!.toStringAsFixed(0)}cm');
         if (latest.leftArmCm   != null) ps.add('arm ${latest.leftArmCm!.toStringAsFixed(0)}cm');
         if (latest.leftThighCm != null) ps.add('thigh ${latest.leftThighCm!.toStringAsFixed(0)}cm');
         if (ps.isNotEmpty) parts.add('Measurements: ${ps.join(', ')}');
+        if (p.navyBodyFatPercent != null) {
+          parts.add('Body fat (Navy method): ${p.navyBodyFatPercent!.toStringAsFixed(1)}%');
+        }
       }
     }
 

@@ -92,30 +92,30 @@ void main() {
       // deliberately do NOT call p.dispose() here (that would double-dispose).
       final p = await seeded(aiEnabled: true);
       await pump(tester, const HomeScreen(), p);
-      expect(find.text('Ask AI Coach'), findsOneWidget);
+      expect(find.text('Ask Coach'), findsOneWidget);
     });
 
     testWidgets('Home hides the coach when disabled', (tester) async {
       final p = await seeded(aiEnabled: false);
       await pump(tester, const HomeScreen(), p);
-      expect(find.text('Ask AI Coach'), findsNothing);
-      expect(find.text('AI COACH'), findsNothing);
+      expect(find.text('Ask Coach'), findsNothing);
+      expect(find.text('COACH'), findsNothing);
     });
 
     testWidgets('Settings always shows the enable toggle; sub-tiles collapse when off',
         (tester) async {
       final p = await seeded(aiEnabled: false);
       await pump(tester, const SettingsScreen(), p);
-      expect(find.text('Enable AI Coach'), findsOneWidget);
+      expect(find.text('Enable Coach'), findsOneWidget);
       // Auto-load sub-tile is gated behind the enable flag.
-      expect(find.text('Load AI at app start'), findsNothing);
+      expect(find.text('Load coach at app start'), findsNothing);
     });
 
     testWidgets('Settings shows sub-tiles when enabled', (tester) async {
       final p = await seeded(aiEnabled: true);
       await pump(tester, const SettingsScreen(), p);
-      expect(find.text('Enable AI Coach'), findsOneWidget);
-      expect(find.text('Load AI at app start'), findsOneWidget);
+      expect(find.text('Enable Coach'), findsOneWidget);
+      expect(find.text('Load coach at app start'), findsOneWidget);
     });
   });
 }

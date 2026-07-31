@@ -64,7 +64,7 @@ class ChatIntent {
   /// the user has logged anything today (feels alive without a data dump).
   static String greetingReply(FitnessProvider p) {
     final name = p.userName.trim().isEmpty ? 'there' : p.userName.trim();
-    final buf = StringBuffer('Hey $name 👋 I\'m your fitness coach. ');
+    final buf = StringBuffer('Hey $name! I\'m your fitness coach. ');
     final cal = p.todayCaloriesTotal.round();
     final prot = p.todayProteinTotal.round();
     if (cal > 0 || prot > 0) {
@@ -243,6 +243,7 @@ class ChatIntent {
     if (m.chestCm     != null) ps.add('chest ${m.chestCm!.toStringAsFixed(0)}cm');
     if (m.waistCm     != null) ps.add('waist ${m.waistCm!.toStringAsFixed(0)}cm');
     if (m.hipsCm      != null) ps.add('hips ${m.hipsCm!.toStringAsFixed(0)}cm');
+    if (m.neckCm      != null) ps.add('neck ${m.neckCm!.toStringAsFixed(0)}cm');
     if (m.leftArmCm   != null) ps.add('arm ${m.leftArmCm!.toStringAsFixed(0)}cm');
     if (m.leftThighCm != null) ps.add('thigh ${m.leftThighCm!.toStringAsFixed(0)}cm');
     return 'Latest measurements: ${ps.join(' · ')}.';

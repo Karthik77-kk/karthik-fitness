@@ -64,11 +64,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _greeting() {
     final h = DateTime.now().hour;
-    if (h < 6) return 'night';
-    if (h < 12) return 'morning';
-    if (h < 17) return 'afternoon';
-    if (h < 21) return 'evening';
-    return 'evening';
+    if (h < 5) return 'night'; // 12am–4:59am → "Good night"
+    if (h < 12) return 'morning'; // 5am–11:59am
+    if (h < 17) return 'afternoon'; // 12pm–4:59pm
+    if (h < 21) return 'evening'; // 5pm–8:59pm
+    return 'evening'; // 9pm–11:59pm
   }
 
   @override
@@ -133,7 +133,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               Row(children: [
                                 Flexible(
                                   child: Text(
-                                    'Good ${_greeting()}, ${context.watch<FitnessProvider>().userName}! 👋',
+                                    'Good ${_greeting()}, ${context.watch<FitnessProvider>().userName}!',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
@@ -171,7 +171,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   delegate: SliverChildListDelegate(_staggerIn(context, [
                     // ── AI Coach (top) — hidden when disabled in Settings ─────
                     if (p.aiCoachEnabled) ...[
-                      const _SectionHdr('AI COACH'),
+                      const _SectionHdr('COACH'),
                       const SizedBox(height: 8),
                       AppCard(
                         onTap: () => openChat(context),
@@ -195,7 +195,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: _kGreen.withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(14),
                             ),
-                            child: const Icon(Icons.smart_toy_rounded,
+                            child: const Icon(Icons.auto_awesome_rounded,
                                 color: _kGreen, size: 22),
                           ),
                           const SizedBox(width: 12),
@@ -203,7 +203,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Ask AI Coach',
+                              Text('Ask Coach',
                                   style: TextStyle(
                                       color: Colors.white,
                                       fontSize: 15,
@@ -294,8 +294,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 20),
 
                     // ── Weight prediction chart ───────────────────────────────
-                    if (p.getRecentBodyEntries(days: 90).length >= 3) ...[
-                      const _SectionHdr('WEIGHT PREDICTION (AI TREND)'),
+                    if (p.hasFreshWeightForecast) ...[
+                      const _SectionHdr('WEIGHT FORECAST'),
                       const SizedBox(height: 10),
                       // CustomPaint chart with no touch interaction.
                       RepaintBoundary(
@@ -1356,10 +1356,10 @@ class _WeightPredictionCard extends StatelessWidget {
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          const Text('🤖', style: TextStyle(fontSize: 18)),
+          const Icon(Icons.insights_rounded, size: 18, color: _kBlue),
           const SizedBox(width: 8),
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('AI Weight Forecast',
+            const Text('Weight Forecast',
                 style: TextStyle(
                   color: Colors.white,
                   fontSize: 13,
@@ -2261,7 +2261,7 @@ class _DailyBriefCard extends StatelessWidget {
           const Text('✨', style: TextStyle(fontSize: 15)),
           const SizedBox(width: 6),
           const Expanded(
-            child: Text('TODAY\'S AI BRIEF',
+            child: Text('TODAY\'S BRIEF',
                 style: TextStyle(
                     color: _kSecond,
                     fontSize: 11,

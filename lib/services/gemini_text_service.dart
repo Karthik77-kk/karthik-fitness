@@ -26,7 +26,7 @@ class GeminiTextService {
   static Future<String> generate(String system, String user,
       {double temperature = 0.4, int maxTokens = 800}) async {
     if (!isConfigured) {
-      throw const GeminiException('Cloud AI isn\'t set up in this build.');
+      throw const GeminiException('The cloud coach isn\'t set up in this build.');
     }
     final uri = Uri.parse(
       'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_key',
@@ -64,19 +64,19 @@ class GeminiTextService {
 
     if (resp.statusCode == 429) {
       throw const GeminiException(
-          'Cloud AI is busy (rate limit). Try again in a minute.');
+          'The coach is busy (rate limit). Try again in a minute.');
     }
     if (resp.statusCode == 400 || resp.statusCode == 403) {
       throw const GeminiException(
-          'Cloud AI is unavailable (key/quota issue).');
+          'The coach is unavailable (key/quota issue).');
     }
     if (resp.statusCode != 200) {
-      throw GeminiException('Cloud AI failed (${resp.statusCode}). Try again.');
+      throw GeminiException('The coach failed (${resp.statusCode}). Try again.');
     }
 
     final text = extractText(jsonDecode(resp.body));
     if (text == null || text.trim().isEmpty) {
-      throw const GeminiException('Cloud AI returned an empty response.');
+      throw const GeminiException('The coach returned an empty response.');
     }
     return text.trim();
   }

@@ -40,8 +40,12 @@ IconData _exerciseIcon(String name) {
 /// Summarises a set list honestly. When all sets share the same reps & weight
 /// it reads "3×10 @20kg"; when sets vary it shows the rep range
 /// ("3 sets · 8–12 reps") instead of misleadingly echoing only the first set.
-String _formatSets(List<SetData> sets, {bool compact = false}) {
+String _formatSets(List<SetData> sets,
+    {bool compact = false, bool isCardio = false}) {
   if (sets.isEmpty) return '';
+  // Cardio logs its duration in `reps` (weight 0) — summarise as "N min",
+  // never "1 set × N reps".
+  if (isCardio) return '${ExerciseDatabase.cardioMinutes(sets)} min';
   final reps = sets.map((s) => s.reps).toList();
   final weights = sets.map((s) => s.weight).toList();
   final sameReps = reps.toSet().length == 1;
@@ -870,7 +874,9 @@ class _TodayWorkoutSummary extends StatelessWidget {
                       child:
                           Text(ex.name, style: const TextStyle(fontSize: 13))),
                   Text(
-                    _formatSets(ex.sets, compact: true),
+                    _formatSets(ex.sets,
+                        compact: true,
+                        isCardio: ExerciseDatabase.isCardio(ex.name)),
                     style:
                         const TextStyle(color: Color(0xFF8E8E93), fontSize: 12),
                   ),
@@ -914,7 +920,8 @@ class _ExerciseCard extends StatelessWidget {
                       fontWeight: FontWeight.w600, fontSize: 15)),
               const SizedBox(height: 4),
               Text(
-                _formatSets(sets),
+                _formatSets(sets,
+                    isCardio: ExerciseDatabase.isCardio(exercise.name)),
                 style: const TextStyle(color: Color(0xFF8E8E93), fontSize: 13),
               ),
             ],

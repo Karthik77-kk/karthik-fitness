@@ -447,7 +447,7 @@ class _StatsScreenState extends State<StatsScreen>
                 const SizedBox(height: 24),
 
                 // ── AI Predictions ────────────────────────────────────
-                const _SectionLabel('AI PREDICTIONS'),
+                const _SectionLabel('PREDICTIONS'),
                 _AiPredictionsCard(provider: p),
                 const SizedBox(height: 24),
 
@@ -487,16 +487,15 @@ class _AiPredictionsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = provider;
-    final entries = p.getRecentBodyEntries(days: 90);
 
-    if (entries.length < 3) {
+    if (!p.hasFreshWeightForecast) {
       return _Card(
         child: Row(children: const [
-          Text('🤖', style: TextStyle(fontSize: 22)),
+          Icon(Icons.insights_rounded, size: 22, color: _kSecond),
           SizedBox(width: 12),
           Expanded(
               child: Text(
-            'Log your weight for at least 3 days to unlock AI predictions.',
+            'Log your weight for a few recent days to unlock predictions.',
             style: TextStyle(color: _kSecond, fontSize: 13, height: 1.4),
           )),
         ]),
@@ -540,9 +539,9 @@ class _AiPredictionsCard extends StatelessWidget {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         // Header
         Row(children: [
-          const Text('🤖', style: TextStyle(fontSize: 20)),
+          const Icon(Icons.insights_rounded, size: 20, color: _kBlue),
           const SizedBox(width: 8),
-          const Text('AI Weight Forecast',
+          const Text('Weight Forecast',
               style: TextStyle(
                   color: Colors.white,
                   fontSize: 14,
@@ -1795,6 +1794,7 @@ class _MeasurementsSection extends StatefulWidget {
 }
 
 class _MeasurementsSectionState extends State<_MeasurementsSection> {
+  final _neckCtrl = TextEditingController();
   final _chestCtrl = TextEditingController();
   final _waistCtrl = TextEditingController();
   final _hipsCtrl = TextEditingController();
@@ -1819,6 +1819,8 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
       _waistCtrl.text = m.waistCm!.toStringAsFixed(1);
     if (_hipsCtrl.text.isEmpty && m.hipsCm != null)
       _hipsCtrl.text = m.hipsCm!.toStringAsFixed(1);
+    if (_neckCtrl.text.isEmpty && m.neckCm != null)
+      _neckCtrl.text = m.neckCm!.toStringAsFixed(1);
     if (_armCtrl.text.isEmpty && m.leftArmCm != null)
       _armCtrl.text = m.leftArmCm!.toStringAsFixed(1);
     if (_thighCtrl.text.isEmpty && m.leftThighCm != null)
@@ -1828,7 +1830,14 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
 
   @override
   void dispose() {
-    for (final c in [_chestCtrl, _waistCtrl, _hipsCtrl, _armCtrl, _thighCtrl]) {
+    for (final c in [
+      _neckCtrl,
+      _chestCtrl,
+      _waistCtrl,
+      _hipsCtrl,
+      _armCtrl,
+      _thighCtrl
+    ]) {
       c.dispose();
     }
     super.dispose();
@@ -1843,6 +1852,7 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
       chestCm: double.tryParse(_chestCtrl.text.trim()),
       waistCm: double.tryParse(_waistCtrl.text.trim()),
       hipsCm: double.tryParse(_hipsCtrl.text.trim()),
+      neckCm: double.tryParse(_neckCtrl.text.trim()),
       leftArmCm: double.tryParse(_armCtrl.text.trim()),
       leftThighCm: double.tryParse(_thighCtrl.text.trim()),
     );
@@ -1881,6 +1891,13 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
       _Card(
           child: Column(children: [
         _FieldRow(
+            label: 'Neck',
+            icon: Icons.straighten_outlined,
+            iconColor: _kGreen,
+            unit: 'cm',
+            ctrl: _neckCtrl),
+        _HDivider(),
+        _FieldRow(
             label: 'Chest',
             icon: Icons.straighten_outlined,
             iconColor: _kGreen,
@@ -1918,6 +1935,11 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
         const SizedBox(height: 14),
         _SaveBtn(onPressed: _save),
       ])),
+      if (p.navyBodyFatPercent != null) ...[
+        const SizedBox(height: 12),
+        _NavyBodyFatCard(
+            pct: p.navyBodyFatPercent!, status: p.navyBodyFatStatus),
+      ],
       if (recent.length >= 2) ...[
         const SizedBox(height: 12),
         _Card(
@@ -1932,6 +1954,7 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
             _MeasurementTrendRow(
                 'Waist', recent.map((e) => e.waistCm).toList()),
             _MeasurementTrendRow('Hips', recent.map((e) => e.hipsCm).toList()),
+            _MeasurementTrendRow('Neck', recent.map((e) => e.neckCm).toList()),
             _MeasurementTrendRow(
                 'Arm', recent.map((e) => e.leftArmCm).toList()),
             _MeasurementTrendRow(
@@ -1940,6 +1963,60 @@ class _MeasurementsSectionState extends State<_MeasurementsSection> {
         )),
       ],
     ]);
+  }
+}
+
+// Body-fat estimate from tape measurements (U.S. Navy method). Shown only when
+// neck + waist (+ hips for women) and height are all present.
+class _NavyBodyFatCard extends StatelessWidget {
+  final double pct;
+  final ({String label, Color color}) status;
+  const _NavyBodyFatCard({required this.pct, required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    return _Card(
+      child: Row(children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: status.color.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(Icons.pie_chart_outline_rounded,
+              color: status.color, size: 22),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text('${pct.toStringAsFixed(1)}%',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(width: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: status.color.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(status.label,
+                    style: TextStyle(
+                        color: status.color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700)),
+              ),
+            ]),
+            const SizedBox(height: 2),
+            const Text('Body fat · U.S. Navy method (neck, waist & height)',
+                style: TextStyle(color: Color(0xFF8E8E93), fontSize: 11)),
+          ]),
+        ),
+      ]),
+    );
   }
 }
 

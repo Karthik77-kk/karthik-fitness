@@ -284,9 +284,11 @@ class _SessionTile extends StatelessWidget {
                     ),
                     if (ex.sets.isNotEmpty)
                       Text(
-                        '${ex.sets.length} set${ex.sets.length > 1 ? 's' : ''}'
-                        '${ex.sets.first.reps > 0 ? '  ×${ex.sets.first.reps}' : ''}'
-                        '${ex.sets.first.weight > 0 ? '  @${ex.sets.first.weight.toStringAsFixed(1)}kg' : ''}',
+                        ExerciseDatabase.isCardio(ex.name)
+                            ? '${ExerciseDatabase.cardioMinutes(ex.sets)} min'
+                            : '${ex.sets.length} set${ex.sets.length > 1 ? 's' : ''}'
+                                '${ex.sets.first.reps > 0 ? '  ×${ex.sets.first.reps}' : ''}'
+                                '${ex.sets.first.weight > 0 ? '  @${ex.sets.first.weight.toStringAsFixed(1)}kg' : ''}',
                         style: const TextStyle(
                             color: Color(0xFF8E8E93), fontSize: 12),
                       ),

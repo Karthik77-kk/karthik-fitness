@@ -342,6 +342,7 @@ class MeasurementEntry {
   final double? chestCm;
   final double? waistCm;
   final double? hipsCm;
+  final double? neckCm;
   final double? leftArmCm;
   final double? leftThighCm;
 
@@ -351,13 +352,14 @@ class MeasurementEntry {
     this.chestCm,
     this.waistCm,
     this.hipsCm,
+    this.neckCm,
     this.leftArmCm,
     this.leftThighCm,
   });
 
   bool get isEmpty =>
       chestCm == null && waistCm == null && hipsCm == null &&
-      leftArmCm == null && leftThighCm == null;
+      neckCm == null && leftArmCm == null && leftThighCm == null;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -365,6 +367,7 @@ class MeasurementEntry {
     if (chestCm != null) 'chestCm': chestCm,
     if (waistCm != null) 'waistCm': waistCm,
     if (hipsCm != null) 'hipsCm': hipsCm,
+    if (neckCm != null) 'neckCm': neckCm,
     if (leftArmCm != null) 'leftArmCm': leftArmCm,
     if (leftThighCm != null) 'leftThighCm': leftThighCm,
   };
@@ -382,6 +385,7 @@ class MeasurementEntry {
       chestCm: j['chestCm'] != null ? (j['chestCm'] as num).toDouble() : null,
       waistCm: j['waistCm'] != null ? (j['waistCm'] as num).toDouble() : null,
       hipsCm: j['hipsCm'] != null ? (j['hipsCm'] as num).toDouble() : null,
+      neckCm: j['neckCm'] != null ? (j['neckCm'] as num).toDouble() : null,
       leftArmCm: j['leftArmCm'] != null ? (j['leftArmCm'] as num).toDouble() : null,
       leftThighCm: j['leftThighCm'] != null ? (j['leftThighCm'] as num).toDouble() : null,
     );
@@ -497,6 +501,12 @@ class ExerciseDatabase {
   /// Their calorie burn is MET × bodyweight × minutes — a sets/reps model is
   /// meaningless for running, cycling, etc. Minutes are stored in SetData.reps.
   static bool isCardio(String exercise) => categoryOf(exercise) == 'Cardio';
+
+  /// Total minutes logged for a cardio exercise. Cardio stores its duration in
+  /// [SetData.reps] (weight 0), so summaries read "N min" instead of a
+  /// meaningless "1 set × N reps". Sums across sets when logged repeatedly.
+  static int cardioMinutes(List<SetData> sets) =>
+      sets.fold<int>(0, (t, s) => t + s.reps);
 
   static const Map<String, (String primary, String secondary, String tip)>
       _exerciseInfo = {
