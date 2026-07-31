@@ -238,6 +238,39 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Reclaim disk + Gradle network resilience (Shorebird build is heavy)
+        # MUST run BEFORE the Gradle/flutter_gemma cache restore below. Shorebird
+        # downloads a SECOND Flutter (~2 GB) and builds an app bundle with ALL THREE
+        # ABIs (arm/arm64/x64), and the restored cache itself has grown multi-GB —
+        # together they overrun the runner's ~14 GB free space ("No space left on
+        # device", now hit at the cache-restore step, previously at
+        # packageReleaseBundle). Reclaim ~20-30 GB by deleting preinstalled toolchains
+        # we never use — WITHOUT touching the Android SDK, Temurin Java, or Flutter
+        # (the build needs those; note we delete only the CodeQL entry under
+        # hostedtoolcache, never the whole cache). Also harden Gradle against the
+        # transient Maven read-timeout: retry slow artifact fetches with backoff
+        # instead of failing the whole resolution.
+        run: |
+          echo "disk before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/share/swift /opt/microsoft \
+                      /usr/local/share/boost /usr/local/graalvm \
+                      /usr/local/share/powershell /usr/lib/google-cloud-sdk 2>/dev/null || true
+          docker image prune -af 2>/dev/null || true
+          echo "disk after:"; df -h / | tail -1
+          mkdir -p "$HOME/.gradle"
+          {
+            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+            echo "systemProp.org.gradle.internal.repository.max.retries=8"
+            echo "systemProp.org.gradle.internal.repository.initial.backoff=500"
+            # Speed: run independent Gradle tasks in parallel and reuse the build
+            # cache across runs (with the Gradle cache action already keyed on
+            # pubspec.lock). Trims a few minutes off the heavier Shorebird build.
+            echo "org.gradle.parallel=true"
+            echo "org.gradle.caching=true"
+          } >> "$HOME/.gradle/gradle.properties"
+
       - name: Cache Gradle & native dependencies
         # Gradle's own dependency cache and flutter_gemma's downloaded native
         # libs (~90 MB of MediaPipe/litertlm binaries) aren't covered by the
@@ -632,37 +665,6 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
-
-      - name: Reclaim disk + Gradle network resilience (Shorebird build is heavy)
-        # Shorebird downloads a SECOND Flutter (~2 GB) and builds an app bundle with
-        # ALL THREE ABIs (arm/arm64/x64); with flutter_gemma's large MediaPipe .so per
-        # ABI this overruns the runner's ~14 GB free space and dies at
-        # packageReleaseBundle with "No space left on device". Reclaim ~20-30 GB by
-        # deleting preinstalled toolchains we never use — WITHOUT touching the Android
-        # SDK, Temurin Java, or Flutter (the build needs those; note we delete only the
-        # CodeQL entry under hostedtoolcache, never the whole cache). Also harden Gradle
-        # against the transient Maven read-timeout seen earlier: retry slow artifact
-        # fetches with backoff instead of failing the whole resolution.
-        run: |
-          echo "disk before:"; df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-                      /opt/hostedtoolcache/CodeQL /usr/share/swift /opt/microsoft \
-                      /usr/local/share/boost /usr/local/graalvm \
-                      /usr/local/share/powershell /usr/lib/google-cloud-sdk 2>/dev/null || true
-          docker image prune -af 2>/dev/null || true
-          echo "disk after:"; df -h / | tail -1
-          mkdir -p "$HOME/.gradle"
-          {
-            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
-            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
-            echo "systemProp.org.gradle.internal.repository.max.retries=8"
-            echo "systemProp.org.gradle.internal.repository.initial.backoff=500"
-            # Speed: run independent Gradle tasks in parallel and reuse the build
-            # cache across runs (with the Gradle cache action already keyed on
-            # pubspec.lock). Trims a few minutes off the heavier Shorebird build.
-            echo "org.gradle.parallel=true"
-            echo "org.gradle.caching=true"
-          } >> "$HOME/.gradle/gradle.properties"
 
       - name: Install Shorebird CLI
         # Shorebird wraps `flutter build` with its own (patched) Flutter so future
