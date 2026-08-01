@@ -420,4 +420,120 @@ void main() {
       expect(r.accent, 0xFF30D158);
     });
   });
+
+// ─── FoodEntry Micros ─────────────────────────────────────────────────────────
+
+  group('FoodEntry micros (fiber/sugar/sodium/alcohol)', () {
+    test('serializes and deserializes fiber, sugar, sodiumMg, isAlcohol', () {
+      final entry = FoodEntry(
+        id: 'test-id',
+        name: 'Dal with Roti',
+        calories: 220,
+        protein: 12,
+        fiber: 6,
+        sugar: 2,
+        sodiumMg: 450,
+        isAlcohol: false,
+        mealType: MealType.lunch,
+        timestamp: DateTime(2024, 1, 15, 12, 0),
+      );
+      final restored = FoodEntry.fromJson(entry.toJson());
+      expect(restored.fiber, 6.0);
+      expect(restored.sugar, 2.0);
+      expect(restored.sodiumMg, 450.0);
+      expect(restored.isAlcohol, false);
+    });
+
+    test('legacy entries without micros default to 0 and false', () {
+      final json = {
+        'id': 'legacy-1',
+        'name': 'Egg',
+        'calories': 78.0,
+        'protein': 6.0,
+        'mealType': 0,
+        'timestamp': DateTime(2024, 1, 15).toIso8601String(),
+        // no fiber, sugar, sodiumMg, isAlcohol
+      };
+      final entry = FoodEntry.fromJson(json);
+      expect(entry.fiber, 0.0);
+      expect(entry.sugar, 0.0);
+      expect(entry.sodiumMg, 0.0);
+      expect(entry.isAlcohol, false);
+    });
+
+    test('alcohol entries correctly marked with isAlcohol=true', () {
+      final beer = FoodEntry(
+        id: 'beer-1',
+        name: 'Beer (330ml)',
+        calories: 155,
+        protein: 1.3,
+        isAlcohol: true,
+        mealType: MealType.snack,
+        timestamp: DateTime(2024, 1, 15, 20, 0),
+      );
+      expect(beer.isAlcohol, true);
+      expect(beer.calories, 155.0); // 7 kcal/g is already in calories
+
+      final restored = FoodEntry.fromJson(beer.toJson());
+      expect(restored.isAlcohol, true);
+    });
+
+    test('clamping prevents negative micros', () {
+      final json = {
+        'id': 'test',
+        'name': 'Food',
+        'calories': 100.0,
+        'protein': 10.0,
+        'fiber': -5.0,
+        'sugar': -2.0,
+        'sodiumMg': -100.0,
+        'mealType': 0,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+      final entry = FoodEntry.fromJson(json);
+      expect(entry.fiber, 0.0); // clamped to 0
+      expect(entry.sugar, 0.0);
+      expect(entry.sodiumMg, 0.0);
+    });
+  });
+
+// ─── FoodItem Micros ──────────────────────────────────────────────────────────
+
+  group('FoodItem micros', () {
+    test('FoodItem supports fiber, sugar, sodiumMg, isAlcohol', () {
+      final dosa = FoodItem(
+        name: 'Masala Dosa',
+        calories: 290,
+        protein: 6,
+        carbs: 42,
+        fat: 10,
+        fiber: 8,
+        sugar: 3,
+        sodiumMg: 420,
+        isAlcohol: false,
+        category: 'South Indian',
+        emoji: '🫓',
+      );
+      expect(dosa.fiber, 8.0);
+      expect(dosa.sugar, 3.0);
+      expect(dosa.sodiumMg, 420.0);
+      expect(dosa.isAlcohol, false);
+    });
+
+    test('alcohol presets in food DB have isAlcohol=true', () {
+      final beer = kFoodDatabase.firstWhere(
+        (f) => f.name == 'Beer (330ml)',
+        orElse: () => FoodItem(
+          name: 'Dummy',
+          calories: 0,
+          protein: 0,
+          category: 'Drinks',
+          emoji: '🍺',
+        ),
+      );
+      expect(beer.name, 'Beer (330ml)');
+      expect(beer.isAlcohol, true);
+      expect(beer.calories, 155.0);
+    });
+  });
 }

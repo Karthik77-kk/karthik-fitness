@@ -66,6 +66,10 @@ class FoodEntry {
   final double protein;
   final double carbs; // grams (0 = unknown / legacy entry)
   final double fat;   // grams (0 = unknown / legacy entry)
+  final double fiber; // grams (0 = unknown)
+  final double sugar; // grams (0 = unknown)
+  final double sodiumMg; // milligrams (0 = unknown)
+  final bool isAlcohol; // 7 kcal/g alcoholic drink
   final MealType mealType;
   final DateTime timestamp;
   final String servingNote; // e.g. "2× 1 roti (~40g)" or "custom entry"
@@ -82,6 +86,10 @@ class FoodEntry {
     required this.protein,
     this.carbs = 0,
     this.fat = 0,
+    this.fiber = 0,
+    this.sugar = 0,
+    this.sodiumMg = 0,
+    this.isAlcohol = false,
     required this.mealType,
     required this.timestamp,
     this.servingNote = '',
@@ -95,6 +103,10 @@ class FoodEntry {
         'protein': protein,
         'carbs': carbs,
         'fat': fat,
+        'fiber': fiber,
+        'sugar': sugar,
+        'sodiumMg': sodiumMg,
+        'isAlcohol': isAlcohol,
         'mealType': mealType.index,
         'timestamp': timestamp.toIso8601String(),
         'servingNote': servingNote,
@@ -136,6 +148,10 @@ class FoodEntry {
       protein: ((j['protein'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
       carbs: ((j['carbs'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
       fat: ((j['fat'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
+      fiber: ((j['fiber'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
+      sugar: ((j['sugar'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
+      sodiumMg: ((j['sodiumMg'] as num?) ?? 0).toDouble().clamp(0, double.infinity),
+      isAlcohol: (j['isAlcohol'] as bool?) ?? false,
       mealType: MealType.values[mealIdx],
       timestamp: ts,
       servingNote: (j['servingNote'] as String?) ?? '',
@@ -724,6 +740,10 @@ class FoodItem {
   final double protein;  // grams per default serving
   final double carbs;    // grams per default serving (0 = unknown, falls back to estimate)
   final double fat;      // grams per default serving (0 = unknown, falls back to estimate)
+  final double fiber;    // grams per default serving (0 = unknown)
+  final double sugar;    // grams per default serving (0 = unknown)
+  final double sodiumMg; // milligrams per default serving (0 = unknown)
+  final bool isAlcohol;  // 7 kcal/g alcoholic drink
   final String category;
   final String emoji;
   final String serving;  // human-readable serving description
@@ -738,6 +758,10 @@ class FoodItem {
     required this.protein,
     this.carbs = 0,
     this.fat = 0,
+    this.fiber = 0,
+    this.sugar = 0,
+    this.sodiumMg = 0,
+    this.isAlcohol = false,
     required this.category,
     required this.emoji,
     this.serving = '1 serving',
@@ -1600,6 +1624,16 @@ const List<FoodItem> kFoodDatabase = [
   FoodItem(name: 'Green Tea', calories: 2, protein: 0, carbs: 0.4, fat: 0, category: 'Drinks', emoji: '🍵', serving: '1 cup'),
   FoodItem(name: 'Whey + Banana Smoothie', calories: 290, protein: 28, carbs: 32, fat: 4, category: 'Drinks', emoji: '🥤', serving: '1 glass (350ml)'),
   FoodItem(name: 'Black Coffee (no sugar)', calories: 2, protein: 0.3, carbs: 0, fat: 0, category: 'Drinks', emoji: '☕', serving: '1 cup'),
+
+  // ── Alcohol ────────────────────────────────────────────────────────────────
+  FoodItem(name: 'Beer (330ml)', calories: 155, protein: 1.3, carbs: 11, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🍺', serving: '330ml standard can'),
+  FoodItem(name: 'Wine (150ml)', calories: 127, protein: 0.2, carbs: 4, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🍷', serving: '150ml glass'),
+  FoodItem(name: 'Whisky (30ml)', calories: 70, protein: 0, carbs: 0, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🥃', serving: '30ml peg'),
+  FoodItem(name: 'Vodka (30ml)', calories: 70, protein: 0, carbs: 0, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🥃', serving: '30ml peg'),
+  FoodItem(name: 'Rum (30ml)', calories: 70, protein: 0, carbs: 0, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🥃', serving: '30ml peg'),
+  FoodItem(name: 'Gin (30ml)', calories: 70, protein: 0, carbs: 0.5, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🥃', serving: '30ml peg'),
+  FoodItem(name: 'Champagne (150ml)', calories: 108, protein: 0.2, carbs: 2, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🍾', serving: '150ml glass'),
+  FoodItem(name: 'Cocktail (Margarita)', calories: 180, protein: 0, carbs: 10, fat: 0, isAlcohol: true, category: 'Drinks', emoji: '🍹', serving: '1 drink (150ml)'),
 ];
 
 

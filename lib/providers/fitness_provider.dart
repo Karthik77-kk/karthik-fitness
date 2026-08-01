@@ -113,10 +113,49 @@ class FitnessProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ── Micro goals (fiber / sugar / sodium) ────────────────────────────────────
+  static const int kDefaultFiberGoal = 30;     // grams/day
+  static const int kDefaultSugarGoal = 50;     // grams/day (soft limit, informational)
+  static const int kDefaultSodiumGoal = 2300;  // milligrams/day (soft limit, informational)
+
+  int _fiberGoal = kDefaultFiberGoal;
+  int _sugarGoal = kDefaultSugarGoal;
+  int _sodiumGoal = kDefaultSodiumGoal;
+  int get fiberGoal => _fiberGoal;
+  int get sugarGoal => _sugarGoal;
+  int get sodiumGoal => _sodiumGoal;
+
+  Future<void> saveFiberGoal(int g) async {
+    _fiberGoal = g.clamp(10, 100);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('fiber_goal', _fiberGoal);
+    notifyListeners();
+  }
+
+  Future<void> saveSugarGoal(int g) async {
+    _sugarGoal = g.clamp(10, 200);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('sugar_goal', _sugarGoal);
+    notifyListeners();
+  }
+
+  Future<void> saveSodiumGoal(int mg) async {
+    _sodiumGoal = mg.clamp(500, 5000);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('sodium_goal', _sodiumGoal);
+    notifyListeners();
+  }
+
   double get carbProgress =>
       carbGoal > 0 ? (todayCarbsEstimate / carbGoal).clamp(0.0, 1.0) : 0.0;
   double get fatProgress =>
       fatGoal > 0 ? (todayFatEstimate / fatGoal).clamp(0.0, 1.0) : 0.0;
+  double get fiberProgress =>
+      fiberGoal > 0 ? (todayFiber / fiberGoal).clamp(0.0, 1.0) : 0.0;
+  double get sugarProgress =>
+      sugarGoal > 0 ? (todaySugar / sugarGoal).clamp(0.0, 1.0) : 0.0;
+  double get sodiumProgress =>
+      sodiumGoal > 0 ? (todaySodiumMg / sodiumGoal).clamp(0.0, 1.0) : 0.0;
 
   /// Protein still needed to hit today's goal (0 once reached). Protein is a
   /// target to *reach*, so this never goes negative.
@@ -721,6 +760,24 @@ class FitnessProvider extends ChangeNotifier {
   /// Real fat (grams) summed from today's logged entries' fat data.
   double get todayFat =>
       _todayFood.fold(0.0, (sum, e) => sum + e.fat);
+
+  /// Fiber (grams) summed from today's logged entries. 0 when no entry carries
+  /// real fiber data (legacy or unknown entries).
+  double get todayFiber =>
+      _todayFood.fold(0.0, (sum, e) => sum + e.fiber);
+
+  /// Sugar (grams) summed from today's logged entries. 0 when unknown.
+  double get todaySugar =>
+      _todayFood.fold(0.0, (sum, e) => sum + e.sugar);
+
+  /// Sodium (milligrams) summed from today's logged entries. 0 when unknown.
+  double get todaySodiumMg =>
+      _todayFood.fold(0.0, (sum, e) => sum + e.sodiumMg);
+
+  /// Alcohol calories (7 kcal/g) summed from today's alcoholic entries.
+  /// Included in [todayCalories], not separate.
+  double get todayAlcoholKcal =>
+      _todayFood.fold(0.0, (sum, e) => sum + (e.isAlcohol ? e.calories : 0.0));
 
   /// Carbs today (grams) for the macro donut — summed per-entry so each item
   /// uses its REAL value when known and the Indian-diet 65/35 split estimate
@@ -2086,6 +2143,9 @@ class FitnessProvider extends ChangeNotifier {
     _stepGoal = prefs.getInt('step_goal') ?? kDefaultStepGoal;
     _carbGoal = prefs.getInt('carb_goal') ?? kDefaultCarbGoal;
     _fatGoal = prefs.getInt('fat_goal') ?? kDefaultFatGoal;
+    _fiberGoal = prefs.getInt('fiber_goal') ?? kDefaultFiberGoal;
+    _sugarGoal = prefs.getInt('sugar_goal') ?? kDefaultSugarGoal;
+    _sodiumGoal = prefs.getInt('sodium_goal') ?? kDefaultSodiumGoal;
 
     // Per-food portion memory + favorites + backup timestamp
     _lastBackupMs = prefs.getInt('last_backup_ms') ?? 0;
