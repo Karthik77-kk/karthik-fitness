@@ -143,23 +143,18 @@ jobs:
           # at all. A same-named secret in a second repo is not the same
           # credential — that is the trap this comment exists to record.
           #
-          # KFIT_APP_TOKEN is the fallback, and on the first live run it turned
-          # out to be the one that works: it reports PUSH access to kfit-app,
-          # not the Contents:read it is documented as having.
+          # KFIT_APP_TOKEN is the fallback, and it is NOT sufficient: it is
+          # Contents:read, exactly as documented. Its `.permissions.push` says
+          # true, which is why the first production run selected it and then
+          # took a 403 on the merge — see the probe comment below.
           #
-          # ⚠️ That is worth a decision rather than being quietly relied on.
-          # private-pr-gate.yml hands this same token to a job that then runs
-          # arbitrary code from the PR under test. The exposure is currently
-          # narrow — the token is in the environment only of the status and
-          # checkout steps, `persist-credentials: false` keeps it out of the
-          # workspace git config, and the analyze/test steps that execute PR
-          # code never see it — but a write-capable credential in a job that
-          # runs untrusted code is not where one belongs.
-          #
-          # The clean end state is a token per purpose: the gate's stays
-          # read-only, and a separate write credential lives here, in a job that
-          # never executes PR code. Until that split is made, this selects
-          # whatever can actually do the work rather than failing on principle.
+          # So neither existing secret can merge, and this workflow cannot work
+          # until one of them is granted Contents:write + Pull requests:write on
+          # kfit-app. The right one to widen is the token behind kfit's
+          # RELEASE_PAT (or a new dedicated secret) — NOT KFIT_APP_TOKEN, which
+          # private-pr-gate.yml hands to a job that runs arbitrary code from the
+          # PR under test. This job never runs PR code, which is why the write
+          # credential belongs here and not there.
           TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
           TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
         run: |
@@ -177,7 +172,13 @@ jobs:
                      --jq '.permissions.push // false' 2>/dev/null || echo unreachable)
             case "$PUSH" in
               true)
-                echo "✅ $NAME can write to $PRIVATE_REPO"
+                # "Reports", not "can". Proven wrong in production on
+                # 2026-08-14: this said true for KFIT_APP_TOKEN and the very
+                # next merge came back 403. `.permissions.push` reflects the
+                # authenticated user's role and does not express a fine-grained
+                # PAT's actual grants, so it only picks a candidate. The 403
+                # tracking below is what decides whether writing really works.
+                echo "· $NAME reports write access to $PRIVATE_REPO (unverified)"
                 [ "$READER" = none ] && READER="$NAME"
                 WRITER="$NAME"; break ;;
               false)
