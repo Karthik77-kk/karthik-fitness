@@ -9,8 +9,12 @@ name: Private Auto-merge
 # stayed blocked while showing green. Disabling it was necessary and it removed
 # the only thing that merged anything: PRs now go green and sit there.
 #
-# `update-behind-prs.yml` died with it, because it only ever acted on PRs that
-# were already armed for native auto-merge, and nothing arms them now.
+# `update-behind-prs.yml` stopped doing anything at the same moment, for a
+# different reason: it only ever acted on PRs that were already armed for native
+# auto-merge, and with the arming workflow disabled, nothing is. Note that it is
+# still registered as ACTIVE on kfit-app — it is inert by circumstance, not by
+# configuration, so it must be disabled there when this lands or the two will
+# both update branches once the quota resets.
 #
 # This workflow replaces BOTH. It is the third leg of the migration, after
 # private-pr-gate.yml (which produces the two required statuses).
@@ -173,9 +177,19 @@ jobs:
           # because they are needed to debug a stuck queue and reveal nothing;
           # titles, branch names and changed files are NEVER printed, because
           # together they are a map of a private codebase.
-          PRS=$(gh pr list --repo "$PRIVATE_REPO" --state open --base main \
-                  --limit 50 \
-                  --json number,headRefOid,headRefName,isDraft,isCrossRepository,title,author,mergeStateStatus)
+          FIELDS=number,headRefOid,headRefName,isDraft,isCrossRepository,title,author,state
+
+          # An explicit PR number is FETCHED, not filtered out of the listing.
+          # Filtering inside a 50-PR window means a dispatch for anything
+          # outside it — or for a PR in the wrong repo — quietly matches
+          # nothing and the run still reports success, which is the worst way
+          # for a manual override to fail.
+          if [ -n "${ONLY_PR:-}" ]; then
+            PRS=$(gh pr view "$ONLY_PR" --repo "$PRIVATE_REPO" --json "$FIELDS" | jq -c '[.]')
+          else
+            PRS=$(gh pr list --repo "$PRIVATE_REPO" --state open --base main \
+                    --limit 50 --json "$FIELDS")
+          fi
 
           TOTAL=$(echo "$PRS" | jq 'length')
           echo "Open PRs: $TOTAL"
@@ -190,13 +204,20 @@ jobs:
             DRAFT=$(get .isDraft)
             FORK=$(get .isCrossRepository)
             AUTHOR=$(get .author.login)
-            STATE=$(get .mergeStateStatus)
             HEAD_REF=$(get .headRefName)
             TITLE=$(get .title)
 
-            if [ -n "${ONLY_PR:-}" ] && [ "$NUM" != "$ONLY_PR" ]; then continue; fi
-
             # ── Eligibility ──────────────────────────────────────────────────
+
+            # `gh pr list` only ever returns open PRs, but `gh pr view` on an
+            # explicit number happily returns a closed or already-merged one —
+            # so a mistyped workflow_dispatch would send this down the whole
+            # merge path for a PR that ended weeks ago. Caught by dry-running
+            # the dispatch path against #148, which is merged: it reported
+            # "would merge".
+            if [ "$(get .state)" != "OPEN" ]; then
+              echo "PR #$NUM: not open — skipped"; SKIPPED=$((SKIPPED+1)); continue
+            fi
             # Ported from auto-merge.yml's `if:` block. It lives in ONE place
             # and both the merge path and the update path read it. The private
             # pair could keep them apart because update-behind-prs.yml filtered
@@ -211,9 +232,23 @@ jobs:
 
             # Dependabot merges by hand (Rule 21): a toolchain bump must never
             # auto-ship a release.
-            if [ "$AUTHOR" = "dependabot[bot]" ]; then
-              echo "PR #$NUM: dependabot — merges by hand"; SKIPPED=$((SKIPPED+1)); continue
-            fi
+            #
+            # BOTH spellings are matched, and that is not defensive padding.
+            # The workflow this replaces tested `github.actor`, where the value
+            # really is `dependabot[bot]`. This one reads the PR object through
+            # gh's GraphQL path, which reports the same account as
+            # `app/dependabot` — verified against kfit-app #127, where
+            # `gh pr list --json author` gives `app/dependabot` while the REST
+            # `.user.login` for the same PR gives `dependabot[bot]`. Carrying
+            # the old literal across looked like a faithful port and would have
+            # meant the guard NEVER fired: Dependabot PRs auto-merging, and a
+            # grouped Actions bump that touches build_apk.yml auto-shipping a
+            # release.
+            case "$AUTHOR" in
+              "dependabot[bot]"|"app/dependabot"|"dependabot")
+                echo "PR #$NUM: dependabot — merges by hand"
+                SKIPPED=$((SKIPPED+1)); continue ;;
+            esac
 
             # Title markers, secondary to draft status. These are MARKERS, not
             # bare substrings: GitHub Actions' contains() is a case-insensitive
@@ -253,23 +288,46 @@ jobs:
             # a migration WAS found. That failure mode is silent and it fails
             # open, which for this guard means auto-merging a production schema
             # change.
-            PR_FILES=$(gh api --paginate "repos/$PRIVATE_REPO/pulls/$NUM/files" \
-                         --jq '.[].filename')
+            #
+            # A read failure SKIPS this PR instead of aborting the sweep. Under
+            # `set -e` an unguarded command substitution would kill the whole
+            # job on one transient 5xx, so a single unlucky PR would stop every
+            # other PR being looked at — the same "one stuck PR starves the
+            # queue" failure that #142 and #144 sat in. Failing closed is also
+            # the right call for this particular read: if the file list cannot
+            # be established, the migrations guard cannot be established either.
+            if ! PR_FILES=$(gh api --paginate "repos/$PRIVATE_REPO/pulls/$NUM/files" \
+                              --jq '.[].filename'); then
+              echo "::warning::Could not read the file list for PR #$NUM — skipping it this sweep."
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
             if grep -q '^supabase/migrations/' <<< "$PR_FILES"; then
               echo "PR #$NUM: touches schema migrations — merges by hand"
               SKIPPED=$((SKIPPED+1)); continue
             fi
 
             # ── Act ──────────────────────────────────────────────────────────
-            # GitHub computes mergeability lazily, so the first read of a PR
-            # that has just changed can legitimately be UNKNOWN. Asking once
+            # mergeStateStatus is read HERE, per PR, immediately before acting —
+            # never taken from the listing at the top of the sweep. That
+            # snapshot goes stale the moment this loop merges anything: every
+            # remaining PR is instantly BEHIND, but the snapshot still says
+            # CLEAN, so the sweep would attempt a merge that 405s, report a
+            # confusing "not merged (state CLEAN)", and skip the branch update
+            # those PRs actually needed — costing them a whole cycle each.
+            #
+            # GitHub also computes mergeability lazily, so the first read of a
+            # PR that has just changed can legitimately be UNKNOWN. Asking once
             # more a few seconds later is the documented way to let it settle;
             # if it is still UNKNOWN we fall through and let the merge attempt
             # be the answer.
+            STATE=$(gh pr view "$NUM" --repo "$PRIVATE_REPO" \
+                      --json mergeStateStatus --jq .mergeStateStatus \
+                      || echo UNKNOWN)
             if [ "$STATE" = "UNKNOWN" ]; then
               sleep 5
               STATE=$(gh pr view "$NUM" --repo "$PRIVATE_REPO" \
-                        --json mergeStateStatus --jq .mergeStateStatus)
+                        --json mergeStateStatus --jq .mergeStateStatus \
+                        || echo UNKNOWN)
             fi
 
             case "$STATE" in
@@ -312,9 +370,28 @@ jobs:
                   # One failure must not abandon the rest — that reintroduces
                   # the stall this loop exists to fix, with an extra step.
                   echo "::warning::Could not update PR #$NUM — most likely a conflict with main."
-                  gh pr comment "$NUM" --repo "$PRIVATE_REPO" --body \
-                    "This branch could not be updated from \`main\` automatically, which usually means a real conflict. Merge \`main\` in locally, resolve it, and push — the gate will re-run and this will finish the job." \
-                    || true
+
+                  # Comment at most ONCE per head SHA. The workflow this
+                  # replaces was event-driven, so "comment on failure" fired
+                  # about as often as someone pushed. This one is a cron: the
+                  # same unguarded comment would land every sweep, roughly 144
+                  # times a day on a PR that is stuck precisely because nobody
+                  # has looked at it yet. Keying the marker on the head SHA
+                  # gives one comment per attempt-worthy state — and a genuinely
+                  # new push, which deserves a fresh nudge, gets one.
+                  MARKER="<!-- kfit-auto-merge:update-failed:$SHA -->"
+                  PRIOR=$(gh api --paginate "repos/$PRIVATE_REPO/issues/$NUM/comments" \
+                            --jq '.[].body' 2>/dev/null | grep -cF "$MARKER" || true)
+                  if [ "${PRIOR:-0}" -eq 0 ]; then
+                    # Assembled with $'\n' rather than a literal line break in
+                    # the string. A continuation line would have to start at
+                    # column 0 to avoid leading whitespace in the comment, and
+                    # column 0 ENDS the YAML block scalar this whole script
+                    # lives in — the file stops parsing and the workflow never
+                    # runs.
+                    NOTE="$MARKER"$'\n'"This branch could not be updated from \`main\` automatically, which usually means a real conflict. Merge \`main\` in locally, resolve it, and push — the gate will re-run and this will finish the job."
+                    gh pr comment "$NUM" --repo "$PRIVATE_REPO" --body "$NOTE" || true
+                  fi
                   SKIPPED=$((SKIPPED+1))
                 fi
                 continue ;;
@@ -342,27 +419,21 @@ jobs:
                   -f "commit_title=$TITLE (#$NUM)"
                   -f "sha=$SHA")
 
-            # Rule 18 enforcement at the one chokepoint where commit bodies
-            # enter main. The repo's squash setting is COMMIT_MESSAGES, so the
-            # body is the branch's commit messages concatenated — and a
-            # Co-Authored-By trailer naming an AI in any of them would land on
-            # main and put that AI in GitHub's Contributors graph, which is the
-            # public-facing thing Rule 18 exists to prevent.
+            # `commit_message` is deliberately NOT set, so GitHub composes the
+            # squash body with its own COMMIT_MESSAGES rendering exactly as it
+            # always has.
             #
-            # When nothing matches, commit_message is left OFF entirely so
-            # GitHub composes the body exactly as it always has. The override
-            # engages only when it must, so the normal path cannot drift from
-            # the default formatting.
-            # Here-strings, not pipes into grep — same pipefail/SIGPIPE trap as
-            # the migrations guard above.
-            AI_TRAILER='^co-authored-by:.*(claude|anthropic|copilot|openai|noreply@anthropic)'
-            BODY=$(gh api --paginate "repos/$PRIVATE_REPO/pulls/$NUM/commits" \
-                     --jq '.[].commit.message' | sed 's/\r$//')
-            if grep -qiE "$AI_TRAILER" <<< "$BODY"; then
-              echo "::warning::PR #$NUM carries an AI co-author trailer; stripping it from the squash body (Rule 18)."
-              CLEAN_BODY=$(grep -viE "$AI_TRAILER" <<< "$BODY" || true)
-              ARGS+=(-f "commit_message=$CLEAN_BODY")
-            fi
+            # An earlier revision of this file stripped AI co-author trailers
+            # (Rule 18) out of the body here. That was wrong twice over.
+            # Supplying commit_message at all replaces GitHub's rendering with a
+            # raw newline-join — a different body on every merge, not just the
+            # offending one, duplicating the subject into the body on a
+            # single-commit PR. And laundering a rule violation in passing means
+            # the branch it came from stays broken and its author is never told;
+            # a guard nobody sees does not change anyone's behaviour.
+            #
+            # Rule 18 is enforced in the GATE instead, where it fails the PR and
+            # names the commit. See the identity guard in private-pr-gate.yml.
 
             if gh api "${ARGS[@]}" >/dev/null; then
               echo "✅ Merged PR #$NUM"
