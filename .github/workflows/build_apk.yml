@@ -1,0 +1,1390 @@
+name: Build Android APK
+
+# Builds and releases kfit-app FROM HERE, in the public repo.
+#
+# Ported from kfit-app's own build_apk.yml on 2026-08-14, when the account hit
+# 3,000/3,000 Actions minutes and every private workflow began failing before
+# starting. The build steps below are the original, unchanged — only the way it
+# is TRIGGERED, where it CHECKS OUT from, and which token PUBLISHES have moved.
+# Everything about how the APK is produced (signing, Shorebird, the rejected-
+# patch fallback, the arm64 flags, the icon step, the size filters) is the same
+# file it always was, deliberately (see feedback: port checks verbatim).
+#
+# ── What changed, and only this ─────────────────────────────────────────────
+#   trigger    push-to-main  ->  a poll of kfit-app's main (see below)
+#   source     this repo     ->  kfit-app, checked out with KFIT_APP_TOKEN
+#   publish    RELEASE_PAT   ->  github.token
+#
+# That last one is a simplification, not a workaround. The release was always
+# published to kfit; this workflow now RUNS in kfit, so a cross-repo publish
+# became a same-repo one and the PAT is no longer needed at all.
+#
+# ── Why it POLLS ────────────────────────────────────────────────────────────
+# Same reason as the gate and the auto-merge sweep: a repository_dispatch from
+# kfit-app needs a workflow run IN kfit-app, which needs minutes, and there are
+# none. The trigger is circular at exactly the moment it is needed. The
+# dispatch below is kept as a fast path for when minutes return; the cron stays
+# permanently, because it is what survives the next exhaustion.
+#
+# ── How it knows what is new ────────────────────────────────────────────────
+# A push gave `github.event.before` for free. A poll has no such thing, and the
+# obvious substitute — the last release tag — is WRONG here: Dart-only merges
+# ship as Shorebird patches and cut no release, so the tag lags behind what has
+# actually been processed and the same commits would be patched over and over,
+# every cycle, forever.
+#
+# So the last processed commit is recorded as a `ci/last-built` tag on kfit-app,
+# moved only after a run succeeds. Absent (first run, or someone deleted it) it
+# falls back to a full release of HEAD, which is the safe direction: it ships
+# something rather than silently skipping, and it re-establishes the marker.
+
+on:
+  schedule:
+    # Offset from the gate ("*/10") and the auto-merge sweep ("4-59/10") so the
+    # three do not all wake at once. GitHub's scheduler is best-effort and in
+    # practice drifts a long way — observed ~45 minutes between fires on this
+    # repo — so this is a floor on latency, never a promise.
+    - cron: "8-59/15 * * * *"
+  # Fast path for when the quota resets on 2026-09-01. Additive: the cron above
+  # is never removed, or the circular dependency comes straight back.
+  repository_dispatch:
+    types: [private-release]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "kfit-app ref to build (blank = main). Validation only — never publishes."
+        required: false
+      force:
+        description: "Build even if no new commits since ci/last-built"
+        required: false
+        type: boolean
+        default: false
+
+# Serialize releases. Two builds racing (e.g. a manual re-run overlapping a
+# real merge) can compute the same version tag — versionCode is derived from
+# commit count, so two runs checking out around the same time can land on an
+# identical number. cancel-in-progress: false queues instead of racing; if
+# several merges land faster than the ~10min build, GitHub keeps only the
+# most recently queued run and drops earlier pending ones (not the running
+# one) — no commits are lost, they just ship together in the next release
+# that actually runs, rather than each merge getting its own APK.
+concurrency:
+  group: build-and-release
+  cancel-in-progress: false
+
+env:
+  PRIVATE_REPO: Karthik77-kk/kfit-app
+  # Moved only after a successful run. This is the poller's replacement for
+  # `github.event.before`.
+  LAST_BUILT_TAG: ci/last-built
+
+jobs:
+  # Dynamic build gate: decide at RUNTIME whether this push actually changed
+  # anything that can affect the APK. A merge that only touched docs, CI config,
+  # the website, or tests produces a functionally-identical APK — building and
+  # releasing it just prompts every user to "update" for nothing and burns ~15
+  # min of runner time. This computes the real changed-file set for the push
+  # (its before→after range) and only lets the build job run when app code moved.
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read   # read the merged PR's labels for [patch]/[full-release] overrides
+    outputs:
+      build:  ${{ steps.check.outputs.build }}
+      mode:   ${{ steps.check.outputs.mode }}
+      sha:    ${{ steps.check.outputs.sha }}
+      before: ${{ steps.check.outputs.before }}
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-app
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          token: ${{ secrets.KFIT_APP_TOKEN }}
+          fetch-depth: 0
+          # Fetch the marker tag too: it is what stands in for
+          # `github.event.before`, and without tags it silently looks like a
+          # first run and rebuilds everything.
+          fetch-tags: true
+          # The token must not survive into the workspace git config — later
+          # steps run code from the repo under build.
+          persist-credentials: false
+      - name: Decide build mode (skip / silent patch / full release)
+        id: check
+        env:
+          # Reads the private repo's PRs for the [patch]/[full-release] labels.
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+        run: |
+          # HYBRID SHOREBIRD GATE — from the ACTUAL changed files, pick the
+          # cheapest correct way to ship this merge. Three outcomes:
+          #   skip    — nothing that reaches the APK changed (docs, website,
+          #             tests, other CI). No build, no release, no user update.
+          #   patch   — the change is 100% Dart (lib/ only) → `shorebird patch`:
+          #             a tiny silent OTA applied on next launch. No APK, no
+          #             GitHub release, no version bump.
+          #   release — something a patch CANNOT carry changed (native/android,
+          #             bundled assets, pubspec dependencies, or this build
+          #             workflow) → full `shorebird release`: new APK + GitHub
+          #             release, and the baseline future patches diff against.
+          # Why the boundary is exactly "lib/ only": a patch replaces only the
+          # Dart AOT (libapp.so) and rides on the installed release's native code
+          # and assets, which it cannot change — Shorebird's own --allow-asset-diffs
+          # help states "asset changes cannot be included in a patch". So the
+          # classification is conservative by design: when in doubt, it releases.
+          # Overrides — labels on the merged PR, checked BEFORE the file scan:
+          #   [skip]         force skip  (a CI/comment-only change to this workflow)
+          #   [patch]        force patch (adding a PURE-Dart dependency — it compiles
+          #                  into the patch even though pubspec changed)
+          #   [full-release] force a full release
+          # A poll has no `github.event.before`. The previous processed commit is
+          # the `ci/last-built` tag on the private repo, moved only after a run
+          # succeeds — see the header for why the last RELEASE tag cannot be used
+          # instead (patches cut no release, so it lags and the same commits get
+          # patched every cycle, forever).
+          AFTER=$(git rev-parse HEAD)
+          BEFORE=$(git rev-parse -q --verify "refs/tags/${LAST_BUILT_TAG}^{commit}" 2>/dev/null || true)
+          echo "sha=${AFTER}"    >> "$GITHUB_OUTPUT"
+          echo "before=${BEFORE}" >> "$GITHUB_OUTPUT"
+
+          # Nothing new since the last successful run. This is the common case
+          # on a cron and must be cheap and silent, not a failure.
+          if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ] \
+             && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "mode=skip"   >> "$GITHUB_OUTPUT"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Already built ${AFTER} — nothing new."
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || \
+             [ -z "$BEFORE" ] || \
+             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # Can't compute a diff → full release (also validates the workflow itself).
+            MODE=release
+            echo "reason=manual/dispatch or no valid base — full release"
+          else
+            FILES=$(git diff --name-only "$BEFORE" "$AFTER")
+            echo "Changed files in this push:"; echo "$FILES"
+            # Only files that actually go into / affect the APK matter here.
+            APP_FILES=$(echo "$FILES" | grep -E '^(lib/|android/|assets/|pubspec\.(yaml|lock)$|\.github/workflows/build_apk\.yml$)' || true)
+
+            # build_apk.yml is BOTH the build recipe AND this gate's own CI
+            # plumbing, so its filename alone can't say whether an edit changes
+            # the APK. Resolve it dynamically: count it as an app change ONLY when
+            # its `build:` job (the part that actually produces the APK) differs
+            # from the previous commit. A detect-logic / comment / workflow-config
+            # edit leaves the APK byte-identical, so it auto-skips with no [skip]
+            # label needed. Comments and blank lines are ignored in the compare; a
+            # real build-step change still counts. Extraction failure falls back to
+            # treating it as an app change (safe).
+            CI_SELF='.github/workflows/build_apk.yml'
+            if echo "$FILES" | grep -qx "$CI_SELF"; then
+              build_job() {
+                git show "$1:$CI_SELF" 2>/dev/null \
+                  | awk '/^  build:/{f=1} f&&/^  [A-Za-z]/&&!/^  build:/{exit} f{print}' \
+                  | grep -vE '^[[:space:]]*(#|$)' || true
+              }
+              NEW_JOB=$(build_job "$AFTER")
+              if [ -n "$NEW_JOB" ] && [ "$(build_job "$BEFORE")" = "$NEW_JOB" ]; then
+                APP_FILES=$(echo "$APP_FILES" | grep -vx "$CI_SELF" || true)
+                echo "note: $CI_SELF changed but its build job is unchanged — APK unaffected, not counted as an app change"
+              fi
+            fi
+
+            # Manual overrides via the merged PR's labels (Rule 23 — computed, but
+            # you can force either way). Look up the PR(s) associated with this
+            # merge commit; empty/permission-less lookup just means "no override".
+            LABELS=$(gh api "repos/${{ env.PRIVATE_REPO }}/commits/${AFTER}/pulls" \
+                       --jq '.[].labels[].name' 2>/dev/null | tr '\n' ' ' || true)
+            echo "PR labels: ${LABELS:-<none>}"
+
+            # An override is ALSO honoured when written into the merge commit
+            # message — which, on a squash merge, is the PR title plus body.
+            # Applying a real label means opening the PR's sidebar and creating
+            # the label if it doesn't exist yet; typing "[full-release]" into the
+            # title looks like it should work and reads identically to a human,
+            # so it silently did nothing (2026-08-13: two PRs marked that way in
+            # the title both skipped, because only labels were read).
+            #
+            # The BRACKETED form is required here. A bare word is not enough:
+            # "patch" turns up in ordinary subjects all the time ("fix the patch
+            # flow"), and matching it loosely would silently downgrade a real
+            # release to an OTA patch.
+            # Matched with shell globs, not grep: the marker is a literal that
+            # contains regex metacharacters ([ ]), so every grep form needs
+            # escaping or -F, and `case` needs neither. Lowercase the message
+            # once so "[Full-Release]" works as well as "[full-release]".
+            MSG_LC=$(git log -1 --pretty=format:'%B' "$AFTER" | tr 'A-Z' 'a-z')
+            OVERRIDE_SRC=""
+            has_override() {
+              case " $LABELS " in *" $1 "*) OVERRIDE_SRC="label";          return 0 ;; esac
+              case "$MSG_LC"    in *"[$1]"*) OVERRIDE_SRC="commit message"; return 0 ;; esac
+              return 1
+            }
+
+            # Explicit overrides win (most specific first). [skip] lets a
+            # CI/comment-only change to this workflow avoid a needless release
+            # (and the "update available" prompt for a byte-identical app).
+            if has_override skip; then
+              MODE=skip;    echo "reason=forced by [skip] (${OVERRIDE_SRC})"
+            elif has_override full-release; then
+              MODE=release; echo "reason=forced by [full-release] (${OVERRIDE_SRC})"
+            elif has_override patch; then
+              MODE=patch;   echo "reason=forced by [patch] (${OVERRIDE_SRC})"
+            elif [ -z "$APP_FILES" ]; then
+              MODE=skip;    echo "reason=no app-relevant files (docs/website/tests/other CI) — nothing to ship"
+            else
+              # Everything under lib/ is Dart → patchable. List anything else that
+              # reaches the APK; if that list is empty the change is Dart-only.
+              UNPATCHABLE=$(echo "$APP_FILES" | grep -vE '^lib/' || true)
+              if [ -z "$UNPATCHABLE" ]; then
+                MODE=patch;   echo "reason=Dart-only (all app changes under lib/) — silent patch"
+              else
+                MODE=release
+                echo "reason=full release — a patch cannot carry these changes:"
+                echo "$UNPATCHABLE" | sed 's/^/  - /'
+              fi
+            fi
+          fi
+
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          [ "$MODE" = "skip" ] && echo "build=false" >> "$GITHUB_OUTPUT" || echo "build=true" >> "$GITHUB_OUTPUT"
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Build gate: **${{ steps.check.outputs.mode }}**" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: detect
+    # Only run the full ~15-min build+release when the detect job says app code
+    # actually changed (or it was a manual dispatch).
+    if: ${{ needs.detect.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    # A cold build is ~10-15 min. The patch fallback can run TWO builds in one
+    # job (a rejected patch, then a full release), so the cap has to cover both
+    # — 60 still stops a hung run far short of the 6h runner default.
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-app
+          # The exact commit detect classified. Resolving 'main' again here
+          # would let a merge landing mid-run produce an APK whose contents do
+          # not match the mode that was decided for it.
+          ref: ${{ needs.detect.outputs.sha }}
+          token: ${{ secrets.KFIT_APP_TOKEN }}
+          fetch-depth: 0   # full history so the commit count (=versionCode) is correct
+          persist-credentials: false
+
+      - name: Compute version (auto, ascending)
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}   # to read the latest release on the public kfit repo
+        run: |
+          # versionCode = number of commits on main — strictly increases every merge,
+          # so we never hand-bump pubspec and PRs can never collide on a version.
+          CODE=$(git rev-list --count HEAD)
+          NAME=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | sed 's/+.*//')
+          # Ascending semantic-looking tag: v<major.minor>.<code>  e.g. v2.3.239
+          TAG="v${NAME%.*}.${CODE}"
+          echo "code=${CODE}"  >> $GITHUB_OUTPUT
+          echo "tag=${TAG}"    >> $GITHUB_OUTPUT
+          echo "label=${TAG}"  >> $GITHUB_OUTPUT
+          echo "Release will be ${TAG} (versionCode ${CODE})"
+
+          # For a PATCH we must target the version users are actually RUNNING — i.e.
+          # the last published RELEASE, not this commit count. Patches don't cut a
+          # release, so after Dart-only merges the count drifts ahead of the release.
+          # Shorebird identifies a release as "<versionName>+<versionCode>"; derive the
+          # code from the latest kfit release tag (v3.0.331 -> 331 -> 3.0.0+331).
+          if [ "${{ needs.detect.outputs.mode }}" = "patch" ]; then
+            LT=$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName 2>/dev/null || true)
+            LC="${LT##*.}"
+            if printf '%s' "$LC" | grep -qE '^[0-9]+$'; then
+              echo "release_version=${NAME}+${LC}" >> $GITHUB_OUTPUT
+              echo "Patch will target release ${NAME}+${LC} (from ${LT})"
+            else
+              echo "::error::Could not determine a release to patch (latest kfit tag='${LT}'). A patch needs an existing release baseline."
+              exit 1
+            fi
+          fi
+
+      - name: Pre-flight checks (fail fast, before the ~10min build)
+        # Catches exactly the two failure modes hit on 2026-07-04: a corrupted/
+        # empty signing secret (discovered ~13min into a build as a cryptic
+        # Gradle "keystore password was incorrect") and a revoked RELEASE_PAT
+        # (discovered only at the final release-publish step, after the whole
+        # APK was already built). Both now fail in seconds, with a clear cause.
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FDC_API_KEY: ${{ secrets.FDC_API_KEY }}
+          GH_BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN }}
+          GH_BACKUP_REPO: ${{ secrets.GH_BACKUP_REPO }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          KFIT_APP_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          fail=0
+          # kfit-app is a single known deployment, not a general template — every
+          # one of these is expected to always be set. An empty value here means
+          # a secret got lost/miscopied (e.g. during a future repo/secret
+          # migration like 2026-07-04's), not a legitimate "feature disabled"
+          # state, so it fails the build rather than silently shipping a build
+          # with a dead feature (e.g. cloud backup or AI meal scan quietly broken
+          # for every user with no CI signal at all).
+          #
+          # SUPABASE_URL and SUPABASE_ANON_KEY are on this list DELIBERATELY,
+          # and were not on the private repo's version. In the app they are
+          # optional by design — absent, they decode to empty, the app reads
+          # "no cloud project", and Settings offers to configure one by hand.
+          # That is correct for the app and lethal for a release build: without
+          # this line the build goes GREEN and ships an APK with cloud sync
+          # silently unconfigured for every user who never configured it by
+          # hand. Exactly the "dead feature, no CI signal" failure the rest of
+          # this pre-flight exists to prevent. They live only in kfit-app's
+          # secret store, and secrets cannot be read back through any API, so
+          # moving the build here means they must be added here too.
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS \
+                      HF_TOKEN FDC_API_KEY GH_BACKUP_TOKEN GH_BACKUP_REPO GEMINI_API_KEY \
+                      SUPABASE_URL SUPABASE_ANON_KEY; do
+            val="${!name}"
+            if [ -z "$val" ]; then
+              echo "::error::Secret $name is empty. Check it's still set on this repo (Settings → Secrets and variables → Actions)."
+              fail=1
+            fi
+          done
+          # A valid PKCS12 keystore's base64 form starts with "MII" (DER SEQUENCE
+          # tag). A short/garbled value here means the secret got corrupted.
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ "${#ANDROID_KEYSTORE_BASE64}" -lt 100 ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 looks too short (${#ANDROID_KEYSTORE_BASE64} chars) to be a real keystore. It may be corrupted."
+            fail=1
+          fi
+          # Sanity bound, not an emptiness check: the actual 2026-07-04 incident
+          # was a botched text-extraction that left the password/alias secrets
+          # holding ~80+ chars of leaked config lines, not an empty value — an
+          # emptiness-only check would have missed it. Real passwords/aliases
+          # are never this long, so this catches the same failure class without
+          # hardcoding the real (short) expected values into a CI script.
+          if [ "${#ANDROID_KEYSTORE_PASSWORD}" -gt 200 ]; then
+            echo "::error::ANDROID_KEYSTORE_PASSWORD is implausibly long (${#ANDROID_KEYSTORE_PASSWORD} chars) — likely corrupted with leaked extra text."
+            fail=1
+          fi
+          if [ "${#ANDROID_KEY_ALIAS}" -gt 200 ]; then
+            echo "::error::ANDROID_KEY_ALIAS is implausibly long (${#ANDROID_KEY_ALIAS} chars) — likely corrupted with leaked extra text."
+            fail=1
+          fi
+          # The release is published to THIS repo now, so the built-in token can
+          # do it and there is no PAT left to expire or be revoked. Kept as a
+          # check anyway because `permissions: contents: write` on the job is
+          # easy to lose in an edit, and losing it fails at the very last step
+          # after the whole ~12 minute build.
+          if ! gh api "repos/${{ github.repository }}" --jq .name >/dev/null 2>&1; then
+            echo "::error::github.token cannot read ${{ github.repository }} — check the job's permissions block."
+            fail=1
+          fi
+          # Reading the private source is what the build actually depends on.
+          if [ -z "${KFIT_APP_TOKEN:-}" ] || ! GH_TOKEN="$KFIT_APP_TOKEN" gh api "repos/${PRIVATE_REPO}" --jq .name >/dev/null 2>&1; then
+            echo "::error::KFIT_APP_TOKEN cannot read ${PRIVATE_REPO}. The build cannot check out the source without it."
+            fail=1
+          fi
+          # Catch a version-tag race early rather than failing at the final
+          # release-creation step after the full build already ran. Only check
+          # if the token itself is valid — an already-failed auth check above
+          # would make this call fail for the wrong reason and double-report.
+          if [ -n "$GITHUB_TOKEN" ] && gh api "repos/${{ github.repository }}/releases/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Release ${{ steps.ver.outputs.tag }} already exists on kfit — another build already published it (likely a concurrent/duplicate trigger). Nothing to do here."
+            fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            echo "✅ Pre-flight checks passed"
+          fi
+          exit "$fail"
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          # 3.44.5+ is required by Shorebird's patch rollout/adoption system —
+          # a release built on an older Flutter can't report which patch a
+          # device is running, so patches never actually roll out (0 downloads).
+          flutter-version: "3.44.5"
+          channel: stable
+          cache: true
+
+      - name: Reclaim disk + Gradle network resilience (Shorebird build is heavy)
+        # MUST run BEFORE the Gradle/flutter_gemma cache restore below. Shorebird
+        # downloads a SECOND Flutter (~2 GB) and builds an app bundle with ALL THREE
+        # ABIs (arm/arm64/x64), and the restored cache itself has grown multi-GB —
+        # together they overrun the runner's ~14 GB free space ("No space left on
+        # device", now hit at the cache-restore step, previously at
+        # packageReleaseBundle). Reclaim ~20-30 GB by deleting preinstalled toolchains
+        # we never use — WITHOUT touching the Android SDK, Temurin Java, or Flutter
+        # (the build needs those; note we delete only the CodeQL entry under
+        # hostedtoolcache, never the whole cache). Also harden Gradle against the
+        # transient Maven read-timeout: retry slow artifact fetches with backoff
+        # instead of failing the whole resolution.
+        run: |
+          echo "disk before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/share/swift /opt/microsoft \
+                      /usr/local/share/boost /usr/local/graalvm \
+                      /usr/local/share/powershell /usr/lib/google-cloud-sdk 2>/dev/null || true
+          docker image prune -af 2>/dev/null || true
+          echo "disk after:"; df -h / | tail -1
+          mkdir -p "$HOME/.gradle"
+          {
+            echo "systemProp.org.gradle.internal.http.socketTimeout=120000"
+            echo "systemProp.org.gradle.internal.http.connectionTimeout=120000"
+            echo "systemProp.org.gradle.internal.repository.max.retries=8"
+            echo "systemProp.org.gradle.internal.repository.initial.backoff=500"
+            # Speed: run independent Gradle tasks in parallel and reuse the build
+            # cache across runs (with the Gradle cache action already keyed on
+            # pubspec.lock). Trims a few minutes off the heavier Shorebird build.
+            echo "org.gradle.parallel=true"
+            echo "org.gradle.caching=true"
+          } >> "$HOME/.gradle/gradle.properties"
+
+      - name: Cache Gradle & native dependencies
+        # Gradle's own dependency cache and flutter_gemma's downloaded native
+        # libs (~90 MB of MediaPipe/litertlm binaries) aren't covered by the
+        # flutter-action cache above, so every build on a fresh runner
+        # re-downloads them from scratch. The Gradle config that determines the
+        # dependency set is generated inline from build_apk.yml (not a
+        # committed android/ file), so that's what the key is derived from.
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cache/flutter_gemma
+            ~/.pub-cache
+          key: gradle-${{ runner.os }}-${{ hashFiles('.github/workflows/build_apk.yml', 'pubspec.lock') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Generate Android scaffold (preserving committed android/)
+        run: |
+          # Back up our committed android/ (has correct manifest, BootReceiver, and build config)
+          cp -r android android_committed
+          cp pubspec.yaml pubspec_backup.yaml
+          cp -r lib lib_backup
+          flutter create --project-name kfit --no-pub .
+          cp pubspec_backup.yaml pubspec.yaml
+          rm -rf lib
+          cp -r lib_backup lib
+          rm -rf lib_backup pubspec_backup.yaml
+          # Restore committed files that flutter create overwrites
+          cp android_committed/app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          # Replace flutter-create kotlin sources entirely to avoid duplicate BootReceiver.kt.
+          # flutter create does not delete non-template files, so BootReceiver.kt survives
+          # at its committed path while the bash one-liner also placed a copy at the wrong
+          # path (com/BootReceiver.kt) — causing a Kotlin Redeclaration error at compile time.
+          rm -rf android/app/src/main/kotlin/
+          cp -r android_committed/app/src/main/kotlin/ android/app/src/main/kotlin/
+          # Restore committed Gradle/Kotlin/AGP versions (already at 9.1, 9.0.1, 2.3.20)
+          cp android_committed/settings.gradle.kts android/settings.gradle.kts
+          cp android_committed/build.gradle.kts android/build.gradle.kts
+          cp android_committed/gradle/wrapper/gradle-wrapper.properties android/gradle/wrapper/gradle-wrapper.properties
+          rm -rf android_committed
+          echo "=== settings.gradle.kts ==="
+          cat android/settings.gradle.kts
+          echo "=== gradle-wrapper.properties ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Configure app signing + patch app name
+        # Keystore + credentials come from encrypted repo secrets (moved out of this
+        # file — it used to hold the base64 keystore and its plaintext password
+        # directly in committed source, which any repo viewer could read). Same
+        # signing key as always, so existing installs keep updating in place.
+        id: sign
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # Decode persistent keystore (same key every build = APK updates in place)
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/kfitness.jks
+
+          # Certificate fingerprint (SHA-256 of the DER-encoded cert, not the private
+          # key) baked into the app so it can recognize its own official build at
+          # runtime. This is public identifying info, not a secret — the same value
+          # apps routinely hand to Firebase/Play Console/Maps API key restrictions.
+          SHA256=$(keytool -list -v -keystore android/app/kfitness.jks \
+              -alias "$ANDROID_KEY_ALIAS" -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null \
+            | grep "SHA256:" | head -1 | sed 's/.*SHA256: *//' | tr -d ':' | tr 'A-F' 'a-f')
+          if [ -z "$SHA256" ]; then
+            echo "::error::Could not read the signing certificate's SHA-256 fingerprint from the keystore."
+            exit 1
+          fi
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+          # Create key.properties
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=kfitness.jks\n' \
+            "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEYSTORE_PASSWORD" "$ANDROID_KEY_ALIAS" > android/key.properties
+
+          # Write complete known-good build.gradle using a list of lines (no triple-quote
+          # block that would violate YAML indentation rules for run: | blocks).
+          python3 - << 'PYEOF'
+          import os
+          kts = 'android/app/build.gradle.kts'
+          groovy = 'android/app/build.gradle'
+          if os.path.exists(kts):
+              os.remove(kts)
+              print('Removed build.gradle.kts')
+          lines = [
+              'plugins {',
+              '    id "com.android.application"',
+              '    id "kotlin-android"',
+              '    id "dev.flutter.flutter-gradle-plugin"',
+              '}',
+              '',
+              'def keystoreProperties = new Properties()',
+              "def keystorePropertiesFile = rootProject.file('key.properties')",
+              'if (keystorePropertiesFile.exists()) {',
+              '    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))',
+              '}',
+              '',
+              'android {',
+              '    namespace "com.example.karthik_fitness"',
+              '    compileSdk flutter.compileSdkVersion',
+              '    ndkVersion flutter.ndkVersion',
+              '',
+              '    compileOptions {',
+              '        coreLibraryDesugaringEnabled true',
+              '        sourceCompatibility JavaVersion.VERSION_11',
+              '        targetCompatibility JavaVersion.VERSION_11',
+              '    }',
+              '',
+              '    kotlinOptions {',
+              '        jvmTarget = "11"',
+              '    }',
+              '',
+              '    defaultConfig {',
+              '        applicationId "com.example.karthik_fitness"',
+              '        minSdk flutter.minSdkVersion',
+              '        targetSdk flutter.targetSdkVersion',
+              '        versionCode flutter.versionCode',
+              '        versionName flutter.versionName',
+              '        ndk {',
+              '            abiFilters "arm64-v8a"',
+              '        }',
+              '    }',
+              '',
+              '    signingConfigs {',
+              '        release {',
+              "            keyAlias keystoreProperties['keyAlias']",
+              "            keyPassword keystoreProperties['keyPassword']",
+              "            storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null",
+              "            storePassword keystoreProperties['storePassword']",
+              '        }',
+              '    }',
+              '',
+              '    buildTypes {',
+              '        release {',
+              '            signingConfig signingConfigs.release',
+              '            minifyEnabled false',
+              '            shrinkResources false',
+              '        }',
+              '    }',
+              '',
+              '    // Strip non-arm64 native libs at packaging. --target-platform',
+              '    // android-arm64 only drops Flutter-built libs; the MediaPipe/',
+              '    // flutter_gemma .so ship inside an AAR and are packaged by Gradle,',
+              '    // which ndk.abiFilters does NOT filter — this does (~46 MB saved).',
+              '    packagingOptions {',
+              '        jniLibs {',
+              "            excludes += ['**/x86_64/**', '**/armeabi-v7a/**']",
+              '        }',
+              '    }',
+              '}',
+              '',
+              '// Belt-and-suspenders against a duplicate arm64-v8a/libapp.so during',
+              '// JNI staging. The PRIMARY guard is not double-passing',
+              '// --target-platform to Shorebird (see the build step) so the target',
+              '// platforms stay distinct. Additionally: Flutter 3.44.5+ stages JNI',
+              '// libs with a typed CopyFlutterJniLibsTask (a DefaultTask with no',
+              '// settable duplicatesStrategy) that aborts if an ABI is listed twice,',
+              '// so de-dupe its targetPlatforms. Older Flutter used a Copy task',
+              '// instead — there set duplicatesStrategy = EXCLUDE.',
+              'tasks.matching { it.name.startsWith("copyJniLibs") }.configureEach {',
+              '    if (it.hasProperty("targetPlatforms")) {',
+              '        if (it.targetPlatforms.isPresent()) {',
+              '            it.targetPlatforms.set(it.targetPlatforms.get().unique(false))',
+              '        }',
+              '    } else if (it.hasProperty("duplicatesStrategy")) {',
+              '        it.duplicatesStrategy = DuplicatesStrategy.EXCLUDE',
+              '    }',
+              '}',
+              '',
+              'flutter {',
+              '    source "../.."',
+              '}',
+              '',
+              'dependencies {',
+              '    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.4"',
+              '}',
+              '',
+              'configurations.all {',
+              '    exclude group: "com.google.mediapipe", module: "tasks-vision-image-generator"',
+              '}',
+          ]
+          open(groovy, 'w').write('\n'.join(lines) + '\n')
+          print('build.gradle written with release signing + desugaring')
+          PYEOF
+
+          # Patch app label to "K"
+          sed -i 's/android:label="[^"]*"/android:label="K"/' android/app/src/main/AndroidManifest.xml
+
+          # Patch AndroidManifest with required permissions (pedometer only).
+          python3 - << 'PYEOF'
+          path = 'android/app/src/main/AndroidManifest.xml'
+          txt = open(path).read()
+          needed = [
+              'android.permission.ACTIVITY_RECOGNITION',
+          ]
+          anchor = '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          perms = anchor
+          for p in needed:
+              if p not in txt:
+                  perms += f'\n    <uses-permission android:name="{p}"/>'
+          txt = txt.replace(anchor, perms, 1)
+          open(path, 'w').write(txt)
+          print('Manifest patched with pedometer permission')
+          PYEOF
+
+          echo "=== Signing + label + permissions configured ==="
+
+      - name: Patch MainActivity for battery optimization method channel
+        run: |
+          # Find and replace the generated MainActivity.kt with one that exposes
+          # battery optimization and notification settings via method channel
+          python3 - << 'PYEOF'
+          import os, glob
+          # Find MainActivity.kt
+          matches = glob.glob('android/app/src/main/kotlin/**/*.kt', recursive=True)
+          main_activity = next((f for f in matches if 'MainActivity' in f), None)
+          if not main_activity:
+              print('MainActivity.kt not found, skipping')
+          else:
+              pkg_line = open(main_activity).readline().strip()  # package com.example.xxx
+              lines = [
+                  pkg_line,
+                  '',
+                  'import android.content.Intent',
+                  'import android.content.pm.PackageManager',
+                  'import android.net.Uri',
+                  'import android.os.Build',
+                  'import android.os.PowerManager',
+                  'import android.view.WindowManager',
+                  'import android.provider.Settings',
+                  'import io.flutter.embedding.android.FlutterActivity',
+                  'import io.flutter.embedding.engine.FlutterEngine',
+                  'import io.flutter.plugin.common.MethodChannel',
+                  'import java.security.MessageDigest',
+                  '',
+                  '@Suppress("DEPRECATION")',
+                  'class MainActivity: FlutterActivity() {',
+                  '    private val CHANNEL = "com.kfitness/battery"',
+                  '    private val PRIVACY_CHANNEL = "com.kfitness/privacy"',
+                  '',
+                  '    // Hides the app from the recents switcher while it is in the',
+                  '    // background, WITHOUT blocking screenshots while it is in use —',
+                  '    // people screenshot their progress to share it, and a fitness app',
+                  '    // that refuses is worse than one that shows a thumbnail.',
+                  '    //',
+                  '    // Set on pause and cleared on resume, because the system takes the',
+                  '    // recents snapshot around pause. Only armed when the user has set a',
+                  '    // PIN: someone who locked the app has asked for this, and someone',
+                  '    // who has not should keep normal behaviour.',
+                  '    private var hideInRecents = false',
+                  '',
+                  '    override fun onPause() {',
+                  '        if (hideInRecents) {',
+                  '            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)',
+                  '        }',
+                  '        super.onPause()',
+                  '    }',
+                  '',
+                  '    override fun onResume() {',
+                  '        super.onResume()',
+                  '        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)',
+                  '    }',
+                  '    private val INTEGRITY_CHANNEL = "com.kfitness/integrity"',
+                  '',
+                  '    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {',
+                  '        super.configureFlutterEngine(flutterEngine)',
+                  '        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)',
+                  '            .setMethodCallHandler { call, result ->',
+                  '                when (call.method) {',
+                  '                    "requestIgnoreBatteryOptimizations" -> {',
+                  '                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {',
+                  '                            val pm = getSystemService(POWER_SERVICE) as PowerManager',
+                  '                            if (!pm.isIgnoringBatteryOptimizations(packageName)) {',
+                  '                                val intent = Intent(',
+                  '                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+                  '                                )',
+                  '                                intent.data = Uri.parse("package:$packageName")',
+                  '                                startActivity(intent)',
+                  '                            }',
+                  '                        }',
+                  '                        result.success(true)',
+                  '                    }',
+                  '                    "isIgnoringBatteryOptimizations" -> {',
+                  '                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {',
+                  '                            val pm = getSystemService(POWER_SERVICE) as PowerManager',
+                  '                            result.success(pm.isIgnoringBatteryOptimizations(packageName))',
+                  '                        } else {',
+                  '                            result.success(true)',
+                  '                        }',
+                  '                    }',
+                  '                    "openNotificationSettings" -> {',
+                  '                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)',
+                  '                        intent.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)',
+                  '                        startActivity(intent)',
+                  '                        result.success(true)',
+                  '                    }',
+                  '                    "openExactAlarmSettings" -> {',
+                  '                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {',
+                  '                            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)',
+                  '                            intent.data = Uri.parse("package:$packageName")',
+                  '                            startActivity(intent)',
+                  '                        }',
+                  '                        result.success(true)',
+                  '                    }',
+                  '                    else -> result.notImplemented()',
+                  '                }',
+                  '            }',
+                  '',
+                  '        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PRIVACY_CHANNEL)',
+                  '            .setMethodCallHandler { call, result ->',
+                  '                when (call.method) {',
+                  '                    "setHideInRecents" -> {',
+                  '                        hideInRecents = call.arguments as? Boolean ?: false',
+                  '                        if (!hideInRecents) {',
+                  '                            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)',
+                  '                        }',
+                  '                        result.success(true)',
+                  '                    }',
+                  '                    else -> result.notImplemented()',
+                  '                }',
+                  '            }',
+                  '',
+                  '        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, INTEGRITY_CHANNEL)',
+                  '            .setMethodCallHandler { call, result ->',
+                  '                when (call.method) {',
+                  '                    "getSigningSha256" -> {',
+                  '                        try {',
+                  '                            val sig = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {',
+                  '                                val info = packageManager.getPackageInfo(',
+                  '                                    packageName, PackageManager.GET_SIGNING_CERTIFICATES)',
+                  '                                info.signingInfo?.apkContentsSigners?.firstOrNull()',
+                  '                            } else {',
+                  '                                val info = packageManager.getPackageInfo(',
+                  '                                    packageName, PackageManager.GET_SIGNATURES)',
+                  '                                info.signatures?.firstOrNull()',
+                  '                            }',
+                  '                            if (sig != null) {',
+                  '                                val digest = MessageDigest.getInstance("SHA-256")',
+                  '                                    .digest(sig.toByteArray())',
+                  '                                val hex = digest.joinToString("") {',
+                  '                                    "%02x".format(it.toInt() and 0xFF)',
+                  '                                }',
+                  '                                result.success(hex)',
+                  '                            } else {',
+                  '                                result.success("")',
+                  '                            }',
+                  '                        } catch (e: Exception) {',
+                  '                            result.success("")',
+                  '                        }',
+                  '                    }',
+                  '                    "getInstalledApkPath" -> {',
+                  '                        try {',
+                  '                            result.success(applicationInfo.sourceDir)',
+                  '                        } catch (e: Exception) {',
+                  '                            result.success(null)',
+                  '                        }',
+                  '                    }',
+                  '                    else -> result.notImplemented()',
+                  '                }',
+                  '            }',
+                  '    }',
+                  '}',
+              ]
+              content = '\n'.join(lines) + '\n'
+              open(main_activity, 'w').write(content)
+              print(f'Patched {main_activity}')
+          PYEOF
+
+      - name: Verify build.gradle signing config
+        run: |
+          echo "=== app/build.gradle (must contain release signingConfig) ==="
+          cat android/app/build.gradle
+          grep -q "signingConfigs.release" android/app/build.gradle && echo "✅ Release signing confirmed" || (echo "❌ Release signing MISSING — build will use debug key!" && exit 1)
+
+      - name: Generate adaptive + legacy launcher icons (green k on off-white)
+        run: |
+          pip install Pillow --break-system-packages -q
+          python3 - << 'PYEOF'
+          import os
+          from PIL import Image, ImageDraw
+          OFFWHITE = (243, 241, 234, 255)  # #F3F1EA warm off-white ground
+          GREEN = (48, 209, 88, 255)       # #30D158 app UI green
+          # Brand "k" mark: pennant stem + two wedges opening right
+          # (same geometry as assets/icon/app_icon.png).
+          STEM = [(28, 28), (40.5, 33), (40.5, 72), (28, 72)]
+          ARM = [(49, 28), (74, 28), (42.5, 50.5)]
+          LEG = [(46.5, 72), (74, 72), (42.5, 50.5)]
+          ART_W, ART_CX, ART_CY = 46.0, 51.0, 50.0  # mark bbox width + centre in 100-box
+          def draw_mark(size, frac, fill, bg):
+              # frac = mark width / canvas. Supersample 4x then downscale for smooth edges.
+              ss = 4
+              s = size * ss
+              img = Image.new('RGBA', (s, s), bg)
+              d = ImageDraw.Draw(img)
+              sc = (s * frac) / ART_W
+              tx = s / 2 - sc * ART_CX
+              ty = s / 2 - sc * ART_CY
+              for poly in (STEM, ARM, LEG):
+                  d.polygon([(tx + sc * x, ty + sc * y) for (x, y) in poly], fill=fill)
+              return img.resize((size, size), Image.LANCZOS)
+          res = 'android/app/src/main/res'
+          # Legacy square icons (pre-API-26): off-white ground + green mark at 46%.
+          legacy = {'mipmap-mdpi': 48, 'mipmap-hdpi': 72, 'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144, 'mipmap-xxxhdpi': 192}
+          for d, sz in legacy.items():
+              p = res + '/' + d
+              os.makedirs(p, exist_ok=True)
+              sq = draw_mark(sz, 0.46, GREEN, OFFWHITE).convert('RGB')
+              sq.save(p + '/ic_launcher.png')
+              sq.save(p + '/ic_launcher_round.png')
+          # Adaptive foreground (API 26+): transparent canvas, mark at 44% so it
+          # stays inside the safe zone the launcher mask crops to.
+          fg = {'mipmap-mdpi': 108, 'mipmap-hdpi': 162, 'mipmap-xhdpi': 216, 'mipmap-xxhdpi': 324, 'mipmap-xxxhdpi': 432}
+          for d, sz in fg.items():
+              p = res + '/' + d
+              os.makedirs(p, exist_ok=True)
+              draw_mark(sz, 0.44, GREEN, (0, 0, 0, 0)).save(p + '/ic_launcher_foreground.png')
+          # Off-white background colour + adaptive-icon XML (green mark over off-white).
+          os.makedirs(res + '/values', exist_ok=True)
+          with open(res + '/values/colors.xml', 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#F3F1EA</color>\n</resources>\n')
+          os.makedirs(res + '/mipmap-anydpi-v26', exist_ok=True)
+          adaptive = '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/ic_launcher_background"/>\n    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n</adaptive-icon>\n'
+          for name in ['ic_launcher.xml', 'ic_launcher_round.xml']:
+              with open(res + '/mipmap-anydpi-v26/' + name, 'w') as f:
+                  f.write(adaptive)
+          print('Green-k launcher icons generated (green on off-white)')
+          PYEOF
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Install Shorebird CLI
+        # Shorebird wraps `flutter build` with its own (patched) Flutter so future
+        # Dart-only changes can ship as silent over-the-air patches. It manages its
+        # own Flutter in ~/.config/shorebird — coexists with the flutter-action
+        # Flutter used above for `flutter create`/`pub get`. shorebird.yaml
+        # (committed) + SHOREBIRD_TOKEN are the only config; no build.gradle needed.
+        run: |
+          curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | bash
+          # PATH exports don't cross GitHub Actions steps — persist via $GITHUB_PATH.
+          # The installer clones to ~/.config/shorebird (XDG); binary is bin/shorebird.
+          # Locate it dynamically (Rule 23) so an installer path change can't silently
+          # break us, and FAIL FAST here instead of 10 min later in the build step.
+          SB_BIN="$HOME/.config/shorebird/bin"
+          if [ ! -x "$SB_BIN/shorebird" ]; then
+            SB_BIN="$(dirname "$(find "$HOME" -type f -name shorebird -path '*/bin/*' 2>/dev/null | head -1)")"
+          fi
+          test -x "$SB_BIN/shorebird" || { echo "::error::shorebird binary not found after install"; exit 1; }
+          echo "$SB_BIN" >> "$GITHUB_PATH"
+          "$SB_BIN/shorebird" --version
+
+      - name: Build (Shorebird release or silent patch)
+        id: shipped
+        # HYBRID BUILD. Same Flutter flags for both paths (identical native code,
+        # arm64-only, obfuscation, dart-defines) so a patch is a valid diff of the
+        # release it targets:
+        #   release → `shorebird release android --artifact apk` — new APK carrying
+        #             the Shorebird updater; published as a GitHub release below.
+        #             --build-number sets versionCode from the commit count.
+        #   patch   → `shorebird patch android --release-version <v>` — builds the
+        #             Dart, diffs it against that release, and uploads a tiny silent
+        #             OTA patch to Shorebird. NO APK, NO GitHub release, NO version
+        #             bump — every publish step below is gated to release mode.
+        # Single-ABI (arm64) everywhere — half the AOT work, ~5 min faster.
+        # --target-platform android-arm64 is passed as a SHOREBIRD arg to
+        # `release` (before --) and directly to the plain dispatch flutter build,
+        # but NEVER inside FLAGS (after --). Reason: Shorebird forwards FLAGS to
+        # `flutter build` on TOP of the target-platform it derives from its own
+        # --target-platform, so ours-after-`--` would list android-arm64 twice and
+        # Flutter 3.44.5's CopyFlutterJniLibsTask (a DefaultTask with no settable
+        # duplicatesStrategy) aborts, staging arm64-v8a/libapp.so twice. As a
+        # Shorebird arg it instead builds one ABI; abiFilters "arm64-v8a" + the
+        # gradle packaging filter keep the APK arm64-only. (patch can't set this —
+        # android_patcher hardcodes all ABIs — but a patch's list is distinct, so
+        # no duplicate.) --obfuscate/--split-debug-info: release hardening; symbols
+        # kept as a 1-day artifact.
+        # Secrets are base64-encoded so they aren't plaintext, grep-able strings in
+        # the APK (decoded at runtime, e.g. GeminiVisionService._key). GitHub sets
+        # CI=true so Shorebird runs non-interactively.
+        #
+        # FALLBACK: a patch that cannot be applied DOWNGRADES to a full release
+        # rather than failing the run — see the patch branch below. The step
+        # outputs the mode that actually shipped (`steps.shipped.outputs.mode`),
+        # which is what every publish step below is gated on; `detect`'s mode is
+        # only the *intent*.
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: |
+          b64() { printf '%s' "$1" | base64 -w 0; }
+          # base64 -w 0 values contain no spaces, so array elements stay intact.
+          FLAGS=(
+            --no-tree-shake-icons
+            --obfuscate --split-debug-info=build/symbols
+            --dart-define=HF_TOKEN_B64=$(b64 "${{ secrets.HF_TOKEN }}")
+            --dart-define=FDC_API_KEY_B64=$(b64 "${{ secrets.FDC_API_KEY }}")
+            --dart-define=GH_BACKUP_TOKEN_B64=$(b64 "${{ secrets.GH_BACKUP_TOKEN }}")
+            --dart-define=GH_BACKUP_REPO_B64=$(b64 "${{ secrets.GH_BACKUP_REPO }}")
+            --dart-define=GEMINI_API_KEY_B64=$(b64 "${{ secrets.GEMINI_API_KEY }}")
+            # Cloud sync. BOTH are safe to ship: the URL is public, and the
+            # publishable key identifies the project and nothing more — every
+            # row it can reach is decided by row-level security on the server.
+            # The SECRET key must never appear here; it bypasses RLS for every
+            # user and belongs only in Edge Function secrets.
+            #
+            # Absent secrets are not an error. They decode to empty, the app
+            # reads as "no cloud project", and Settings offers to configure one
+            # by hand instead — which is the only reason this was survivable
+            # while these two were missing entirely.
+            --dart-define=SUPABASE_URL_B64=$(b64 "${{ secrets.SUPABASE_URL }}")
+            --dart-define=SUPABASE_ANON_KEY_B64=$(b64 "${{ secrets.SUPABASE_ANON_KEY }}")
+            --dart-define=EXPECTED_SIGNING_SHA256=${{ steps.sign.outputs.sha256 }}
+          )
+
+          # The mode that actually ships. Starts as detect's decision and can be
+          # downgraded from patch → release by the fallback below.
+          MODE="${{ needs.detect.outputs.mode }}"
+
+          full_release() {
+            shorebird release android --artifact apk --flutter-version=3.44.5 \
+              --target-platform android-arm64 -- \
+              "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
+          }
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # VALIDATION ONLY. A manual dispatch is used to check that a branch still
+            # builds — it must NOT run `shorebird release`, because that permanently
+            # registers versionCode N (= commit count) on Shorebird's backend, and
+            # the eventual squash-merge of that branch lands on the SAME N → the real
+            # release then fails "existing android release for version 3.0.0+N".
+            # A plain flutter build exercises the same compile/gradle/disk path with
+            # identical flags but reserves no version. (Discovered 2026-07-24: a
+            # dispatch that pre-registered 3.0.0+332 blocked the merge's release.)
+            echo "🔎 Validation build (dispatch) — plain flutter build, no Shorebird release registered."
+            # Plain flutter build has no Shorebird --target-platform prepend, so
+            # pass single-ABI arm64 here to keep the validation build fast/small.
+            flutter build apk --release --target-platform android-arm64 "${FLAGS[@]}" --build-number=${{ steps.ver.outputs.code }}
+          elif [ "$MODE" = "patch" ]; then
+            echo "🩹 Silent patch → release ${{ steps.ver.outputs.release_version }}"
+            # NOTE: `shorebird patch` has NO --flutter-version option (unlike
+            # `shorebird release`). A patch inherits the exact Flutter revision
+            # of its target release automatically, so pinning it here is both
+            # invalid (exit 64 "Could not find an option named --flutter-version")
+            # and unnecessary. Everything after `--` is proxied to `flutter build`.
+            # --allow-asset-diffs: Flutter regenerates NativeAssetsManifest.json
+            # per build, so a patch trips a benign asset-diff and aborts (exit 70,
+            # UnpatchableChangeException). Safe here because `detect` only ever
+            # patches lib/-only diffs — a real assets/ change forces release mode,
+            # so a patch can never carry a legitimate asset change. Native diffs
+            # are intentionally NOT allowed (they must still fail) — they fall
+            # back to a full release instead, below.
+            if shorebird patch android --allow-asset-diffs \
+                 --release-version="${{ steps.ver.outputs.release_version }}" \
+                 -- "${FLAGS[@]}"; then
+              echo "✅ Patch uploaded."
+            else
+              # FALLBACK — a patch the installed release cannot accept is not a
+              # build failure, it just means this change has to ship the heavy way.
+              #
+              # `detect` classifies from the CHANGED FILES of this push, which is
+              # the only information it has; but patchability is decided by the
+              # diff against the *baseline release users are running*, which can
+              # differ for reasons no file in this push mentions. The case that
+              # produced this fallback (2026-08-13, PR #129): a lib/-only merge,
+              # correctly classified as Dart-only, whose patch was still rejected
+              # because a plugin's Kotlin was compiled differently into
+              # classes4.dex relative to the baseline — a native change with no
+              # native file in the diff. Nothing detect can see, so it cannot be
+              # fixed by classifying harder; it has to be handled after the fact.
+              #
+              # A full release is always a valid way to ship a change a patch
+              # cannot carry, so fall back unconditionally rather than trying to
+              # tell "unpatchable" apart from a transient Shorebird failure — if
+              # the failure really was environmental, the release build fails too
+              # and the run still goes red. The pre-flight already proved this
+              # run's tag is free on kfit, so publishing below is safe.
+              echo "::warning title=Patch not applicable::Shorebird could not patch ${{ steps.ver.outputs.release_version }} — falling back to a full release (${{ steps.ver.outputs.tag }})."
+              MODE=release
+              # The patch attempt left a bundle-shaped build tree behind; start
+              # the release from a clean one so no intermediate from the aab
+              # build can leak into the APK's JNI staging.
+              flutter clean
+              flutter pub get
+              echo "📦 Fallback full release (versionCode ${{ steps.ver.outputs.code }})"
+              full_release
+              {
+                echo "## ⚠️ Patch fell back to a full release"
+                echo ""
+                echo "\`shorebird patch\` could not apply to \`${{ steps.ver.outputs.release_version }}\`, so this merge shipped as a full release instead."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "📦 Full release (versionCode ${{ steps.ver.outputs.code }})"
+            full_release
+          fi
+
+          # Publish steps below gate on THIS, not on detect's mode.
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+
+      # ── Everything below publishes an APK/GitHub release → RELEASE MODE ONLY.
+      # A patch produces no installable APK (it uploads a diff to Shorebird), so
+      # these are all skipped for patch mode.
+      - name: Upload debug symbols
+        if: steps.shipped.outputs.mode == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-symbols
+          path: build/symbols
+          retention-days: 1
+
+      - name: Rename APK
+        if: steps.shipped.outputs.mode == 'release'
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/kfit.apk
+
+      - name: Upload APK artifact
+        if: steps.shipped.outputs.mode == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kfit
+          path: build/app/outputs/flutter-apk/kfit.apk
+          # 1 day, not 30: the APK is permanently attached to the GitHub Release,
+          # so this artifact is just for same-day debugging. At ~127 MB/build the
+          # old 30-day retention piled up to ~6 GB and tripped the account storage
+          # quota, which silently stopped Actions from dispatching new runs.
+          retention-days: 1
+
+      - name: Verify APK exists before release
+        if: steps.shipped.outputs.mode == 'release'
+        run: |
+          if [ ! -f build/app/outputs/flutter-apk/kfit.apk ]; then
+            echo "❌ ERROR: kfit.apk not found at build/app/outputs/flutter-apk/kfit.apk"
+            ls -lh build/app/outputs/flutter-apk/ || echo "Directory does not exist"
+            exit 1
+          fi
+          APK_SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk | cut -f1)
+          echo "✅ APK verified: $APK_SIZE"
+
+      - name: APK size breakdown (what's eating the size)
+        if: steps.shipped.outputs.mode == 'release'
+        # Lists the 20 largest entries inside the APK so bloat is visible in the
+        # run summary (native inference .so vs app code vs assets). uncompressed
+        # bytes; the .apk itself is smaller after DEFLATE.
+        run: |
+          APK=build/app/outputs/flutter-apk/kfit.apk
+          {
+            echo "## APK size breakdown"
+            echo ""
+            echo "Total APK: **$(du -h "$APK" | cut -f1)**"
+            echo ""
+            echo "| Size (uncompressed) | File |"
+            echo "|---:|---|"
+            unzip -l "$APK" | awk 'NR>3 && $4!="" {printf "%d\t%s\n", $1, $4}' \
+              | sort -rn | head -20 \
+              | awk -F'\t' '{ mb=$1/1048576; printf "| %.1f MB | `%s` |\n", mb, $2 }'
+            echo ""
+            echo "_lib/**/*.so = native runtime (flutter_gemma MediaPipe/LiteRT + Flutter). The Gemma model is downloaded at runtime, not bundled._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate delta patch from previous release (best-effort, never fatal)
+        id: patch
+        if: steps.shipped.outputs.mode == 'release'
+        # DELTA UPDATE — Phase 1 (inert). The ~170 MB APK is mostly a byte-identical
+        # native AI runtime; only the compiled Dart (libapp.so, a few MB) changes
+        # between builds. So a binary patch from the PREVIOUS release's kfit.apk to
+        # this one is tiny (~MBs). We publish it as an extra release asset so a
+        # one-build-behind user can later update by downloading the patch instead of
+        # the whole APK. The app IGNORES these assets until the delta-updater ships —
+        # this step only produces artifacts, it changes nothing for current installs.
+        #
+        # Best-effort by design: ANY failure here — no previous release, no kfit.apk
+        # on it, bsdiff OOM/timeout, unparseable tag — just means "no patch this
+        # release"; the full kfit.apk is always published regardless. `set +e` +
+        # explicit `exit 0` keep the step green on every skip path; continue-on-error
+        # is a second net so a patch problem can NEVER fail or block the release.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.ver.outputs.tag }}
+          NEW_BUILD: ${{ steps.ver.outputs.code }}
+        run: |
+          set +e
+          OUT=build/app/outputs/flutter-apk
+          APK="$OUT/kfit.apk"
+          WORK=build/patchwork
+          mkdir -p "$WORK"
+
+          # N-1 = whatever release is currently "latest": the new one isn't created
+          # yet (this runs before "Create GitHub Release"), and build-and-release is a
+          # serialized concurrency group, so there is no race on "latest".
+          PREV_TAG=$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName 2>/dev/null)
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous release — skipping patch (nothing to diff against)."; exit 0
+          fi
+          echo "Delta: previous $PREV_TAG -> new $NEW_TAG"
+
+          if ! gh release download "$PREV_TAG" --repo ${{ github.repository }} \
+                 -p 'kfit.apk' -D "$WORK" --clobber 2>/dev/null; then
+            echo "Previous release $PREV_TAG has no kfit.apk asset — skipping patch."; exit 0
+          fi
+          PREV="$WORK/kfit.apk"
+
+          # bsdiff on ~170 MB wants a few GB RAM + a couple minutes (suffix sort);
+          # ubuntu-latest (16 GB) fits it. timeout-box so a pathological input can't
+          # hang the release build (the 45-min job cap is a blunter backstop).
+          sudo apt-get update -qq >/dev/null 2>&1
+          if ! sudo apt-get install -y -qq bsdiff >/dev/null 2>&1; then
+            echo "bsdiff unavailable — skipping patch."; exit 0
+          fi
+          if ! timeout 600 bsdiff "$PREV" "$APK" "$WORK/kfit.patch"; then
+            echo "bsdiff failed or timed out — skipping patch."; rm -f "$WORK/kfit.patch"; exit 0
+          fi
+
+          FULL_BYTES=$(stat -c%s "$APK")
+          PATCH_BYTES=$(stat -c%s "$WORK/kfit.patch")
+          # Guard (computed per-release): if the native libs shifted this build (a
+          # Flutter/flutter_gemma bump), the patch approaches full size and saves
+          # nothing — drop it so the app just does a normal full download.
+          if [ "$PATCH_BYTES" -ge $(( FULL_BYTES * 60 / 100 )) ]; then
+            echo "Patch ${PATCH_BYTES}B >= 60% of full ${FULL_BYTES}B — not worth it, skipping."; exit 0
+          fi
+
+          # build number = last dotted segment of the tag (v3.0.325 -> 325). Bail if
+          # it isn't a clean integer so we never write a malformed patch.json.
+          FROM_BUILD=$(printf '%s' "$PREV_TAG" | awk -F. '{print $NF}')
+          if ! printf '%s' "$FROM_BUILD" | grep -qE '^[0-9]+$'; then
+            echo "Could not parse a build number from tag '$PREV_TAG' — skipping patch."; exit 0
+          fi
+
+          FROM_SHA=$(sha256sum "$PREV"             | cut -d' ' -f1)
+          TO_SHA=$(sha256sum "$APK"                | cut -d' ' -f1)
+          PATCH_SHA=$(sha256sum "$WORK/kfit.patch" | cut -d' ' -f1)
+
+          cp "$WORK/kfit.patch" "$OUT/kfit.patch"
+          # patch.json drives the app's two SHA-256 gates: it verifies the installed
+          # APK == fromSha256 before patching, and the reconstructed APK == toSha256
+          # before installing. jq (not a heredoc) avoids YAML block-scalar indentation
+          # pitfalls and guarantees valid JSON.
+          jq -n \
+            --argjson fromBuild "$FROM_BUILD" \
+            --arg     fromTag   "$PREV_TAG" \
+            --arg     fromSha256 "$FROM_SHA" \
+            --argjson toBuild   "$NEW_BUILD" \
+            --arg     toTag     "$NEW_TAG" \
+            --arg     toSha256  "$TO_SHA" \
+            --argjson patchSize "$PATCH_BYTES" \
+            --arg     patchSha256 "$PATCH_SHA" \
+            '{fromBuild:$fromBuild, fromTag:$fromTag, fromSha256:$fromSha256, toBuild:$toBuild, toTag:$toTag, toSha256:$toSha256, patchSize:$patchSize, patchSha256:$patchSha256}' \
+            > "$OUT/patch.json"
+
+          echo "patch_ready=true" >> "$GITHUB_OUTPUT"
+          PMB=$(awk -v b="$PATCH_BYTES" 'BEGIN{printf "%.1f", b/1048576}')
+          FMB=$(awk -v b="$FULL_BYTES"  'BEGIN{printf "%.0f", b/1048576}')
+          {
+            echo "## Delta patch"
+            echo ""
+            echo "Patch \`$PREV_TAG\` → \`$NEW_TAG\`: **${PMB} MB** (vs ${FMB} MB full APK)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compose dynamic release notes
+        id: notes
+        if: steps.shipped.outputs.mode == 'release'
+        run: |
+          set -e
+          # What's-new must list ONLY the commits THIS push adds — not a rolling
+          # window of history. The previous fix compared against the latest
+          # release tag, but releases live in the public kfit repo while this is
+          # the private source repo (unrelated histories), so `PREV..HEAD` never
+          # resolved and it silently fell back to HEAD~10 — dumping the last ten
+          # commits' subjects into every release's changelog (the "why is it
+          # showing all the old features" bug).
+          #
+          # `github.event.before` is main's tip immediately before this push, so
+          # `before..HEAD` is exactly the newly-merged commit(s) (usually a single
+          # squash commit = the PR title). Fall back to just HEAD~1 for manual /
+          # first-push runs where `before` is absent or the zero-SHA.
+          # Polling replacement for `github.event.before`: the commit the last
+          # successful run recorded. Same meaning, same range, so the changelog
+          # still lists only what this release actually adds.
+          BEFORE_SHA="${{ needs.detect.outputs.before }}"
+          ZERO="0000000000000000000000000000000000000000"
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$ZERO" ] \
+             && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            RANGE="${BEFORE_SHA}..HEAD"
+          else
+            RANGE="HEAD~1..HEAD"
+          fi
+          echo "Changelog range: ${RANGE}"
+          # Each squash-merged PR is one commit whose subject is the PR title.
+          # Strip the "Build N: " prefix, the "(#NN)" suffix, and any build-mode
+          # marker ([full-release]/[patch]/[skip]) for a clean changelog — those
+          # markers are instructions to the gate above, and shipping one verbatim
+          # into the user's "What's new" is exactly the Rule 19 leak.
+          # Then drop internal/CI/docs/test commits so engineering-only work never
+          # leaks into the user-facing "What's new" text (Rule 19): conventional
+          # prefixes (ci/chore/docs/test/refactor/build/style/perf), merge/wip,
+          # dependabot bumps, and subjects that are plainly about the repo/CI
+          # rather than the app (release cleanup, workflows, governance, etc.).
+          CHANGES=$(git log "$RANGE" --no-merges --pretty=format:'%s' \
+            | sed -E 's/\[(full-release|patch|skip)\]//gI; s/^Build [0-9]+:[[:space:]]*//; s/[[:space:]]*\(#[0-9]+\)[[:space:]]*$//; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+            | grep -v '^$' \
+            | grep -viE '^(merge|wip|fixup|revert |bump )' \
+            | grep -viE '^(ci|chore|docs|test|refactor|build|style|perf)[:(]' \
+            | grep -viE '(release cleanup|weekly release|co-?author|branch protection|quality gate|governance|pipeline|workflow|keystore|dual-approval|harden|rule [0-9]+)' \
+            | sed -E 's/^/- /' \
+            | head -12)
+          [ -z "$CHANGES" ] && CHANGES="- Under-the-hood improvements"
+          # Actual APK size (dynamic — no more hardcoded ~295 MB).
+          BYTES=$(stat -c%s build/app/outputs/flutter-apk/kfit.apk)
+          MB=$(awk -v b="$BYTES" 'BEGIN{printf "%.0f", b/1048576}')
+          {
+            echo "### What's new in ${{ steps.ver.outputs.tag }}"
+            echo ""
+            echo "$CHANGES"
+            echo ""
+            echo "---"
+            echo "~${MB} MB · Requires Android 8.0+"
+            echo ""
+            echo "### Install"
+            echo "1. Download \`kfit.apk\` below"
+            echo "2. Android Settings → Install unknown apps → Allow"
+            echo "3. Tap the downloaded file to install"
+          } > release_notes.md
+          echo "----- release_notes.md -----"
+          cat release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Create GitHub Release with APK
+        # Publishes to the public kfit repo (distribution-only), not this
+        # private source repo — the website and in-app updater both point at
+        # Karthik77-kk/kfit, so this is what keeps them working unchanged.
+        #
+        # Only on a real push to main, and only in RELEASE mode (a patch has no
+        # APK to publish). A `workflow_dispatch` run (used to VALIDATE a branch —
+        # e.g. the Shorebird build) still builds + uploads the APK artifact for
+        # hands-on testing, but must NOT publish a user-facing release from an
+        # unmerged/unverified branch.
+        #
+        # `github.event_name == 'push'` became "not a manual dispatch". The
+        # meaning is unchanged — a dispatch is used to VALIDATE a branch and
+        # must never publish a user-facing release from unmerged code — but the
+        # automatic trigger is now a cron or a repository_dispatch rather than
+        # a push, so testing for 'push' would have silently disabled publishing
+        # altogether and left every poll building an APK nobody receives.
+        if: github.event_name != 'workflow_dispatch' && steps.shipped.outputs.mode == 'release'
+        run: |
+          OUT=build/app/outputs/flutter-apk
+          ASSETS=("$OUT/kfit.apk")
+          # Attach the delta patch + its metadata when this build produced one
+          # (absent on the first release or a native-lib-shift build — see the
+          # "Generate delta patch" step). Purely additive; kfit.apk always ships.
+          if [ -f "$OUT/kfit.patch" ] && [ -f "$OUT/patch.json" ]; then
+            ASSETS+=("$OUT/kfit.patch" "$OUT/patch.json")
+            echo "Attaching delta patch assets: kfit.patch + patch.json"
+          fi
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            "${ASSETS[@]}" \
+            --repo ${{ github.repository }} \
+            --title "${{ steps.ver.outputs.label }}" \
+            --notes-file release_notes.md \
+            --latest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # The single piece of state the poll depends on. Moved LAST and only on
+      # success, so a failed build is retried on the next tick rather than
+      # being silently marked as done — the same guarantee the push trigger got
+      # for free, and the reason a broken build still never ships.
+      #
+      # Skipped for a manual dispatch: that is a validation build, possibly of
+      # an unmerged branch, and must not claim main has been released.
+      - name: Record this commit as built
+        if: success() && github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          SHA: ${{ needs.detect.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Force-updates the ref, creating it when absent. A plain POST fails
+          # with 422 once the tag exists, which would leave the marker stuck at
+          # the first commit it ever saw and rebuild the same range forever.
+          if gh api -X PATCH "repos/${PRIVATE_REPO}/git/refs/tags/${LAST_BUILT_TAG}" \
+               -f sha="$SHA" -F force=true >/dev/null 2>&1; then
+            echo "Marker moved to ${SHA}"
+          elif gh api -X POST "repos/${PRIVATE_REPO}/git/refs" \
+                 -f ref="refs/tags/${LAST_BUILT_TAG}" -f sha="$SHA" >/dev/null 2>&1; then
+            echo "Marker created at ${SHA}"
+          else
+            # Not fatal: the APK is already published, and failing here would
+            # mark a good release as failed. The cost is one redundant rebuild
+            # next tick, which is visible and harmless.
+            echo "::warning::Could not move ${LAST_BUILT_TAG}. The next run may rebuild this commit."
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          # What actually shipped, which is not always what detect intended (the
+          # patch fallback rewrites it). Empty when the build step itself died
+          # before setting an output — fall back to the intent so a failed run
+          # still says which kind of build it was trying to do.
+          MODE="${{ steps.shipped.outputs.mode }}"
+          if [ -z "$MODE" ]; then MODE="${{ needs.detect.outputs.mode }}"; fi
+          if [ "$MODE" = "patch" ]; then
+            {
+              echo "## 🩹 Silent patch"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Type | Shorebird OTA patch (Dart-only, no new APK/release) |"
+              echo "| Applied to release | \`${{ steps.ver.outputs.release_version }}\` |"
+              echo "| Users get it | automatically on next app launch |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            SIZE=$(du -h build/app/outputs/flutter-apk/kfit.apk 2>/dev/null | cut -f1 || echo "?")
+            {
+              echo "## 📦 Build & Release"
+              echo ""
+              echo "| Field | Value |"
+              echo "|---|---|"
+              echo "| Release | \`${{ steps.ver.outputs.tag }}\` (versionCode ${{ steps.ver.outputs.code }}) |"
+              echo "| APK size | ${SIZE} |"
+              echo "| Published to | [Karthik77-kk/kfit releases](https://github.com/Karthik77-kk/kfit/releases/tag/${{ steps.ver.outputs.tag }}) |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
