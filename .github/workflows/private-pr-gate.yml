@@ -1,0 +1,273 @@
+name: Private PR Quality Gate
+
+# Runs kfit-app's PR quality gate HERE, in the public repo, and reports the
+# result back to the private PR.
+#
+# Why: GitHub bills private-repo Actions minutes against the account quota and
+# gives public-repo standard runners away free. On 2026-08-14 the account hit
+# 3,000/3,000 and every kfit-app workflow began failing *before starting* — no
+# steps, no logs, because GitHub would not allocate a runner at all. That blocks
+# every merge, because branch protection requires checks that can no longer run.
+#
+# The private source is NEVER mirrored here. It is checked out onto the runner's
+# temporary workspace with a read-only token and disappears with the runner.
+#
+# ── Why this POLLS instead of being triggered ───────────────────────────────
+# The obvious design is: private repo sends a repository_dispatch, public repo
+# runs CI. That cannot work, and the reason is worth stating so nobody rebuilds
+# it that way. Sending a dispatch needs a workflow run IN THE PRIVATE REPO,
+# which needs Actions minutes, and there are none. The trigger is circular at
+# exactly the moment it is needed.
+#
+# So the public repo polls: it asks the private repo which PRs are open and
+# which head commits have no result yet. That needs zero private minutes, and
+# it is computed from real state rather than from a trigger someone has to keep
+# wired up correctly (see Rule 23).
+#
+# repository_dispatch is kept as a fast path for when the quota resets and the
+# private side can afford a one-line dispatch job again.
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's scheduler is best-effort and drifts under load,
+    # so this is a floor on latency, not a promise.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to gate (blank = every open PR that needs it)"
+        required: false
+  repository_dispatch:
+    types: [private-pr-quality]
+
+concurrency:
+  # NOT cancel-in-progress. Runs pick up different PRs, so cancelling a running
+  # one loses that PR's result and it waits another full cycle.
+  group: private-pr-gate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPO: Karthik77-kk/kfit-app
+  # Must match the required status check on kfit-app/main EXACTLY. Branch
+  # protection matches by context string; a typo here produces a green status
+  # nobody is waiting for while the PR blocks forever on the real one.
+  CONTEXT: Verify (analyze + test)
+  COVERAGE_MIN: "80"
+
+jobs:
+  discover:
+    name: Find PRs needing a gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      any: ${{ steps.find.outputs.any }}
+    steps:
+      - name: Ask the private repo what needs running
+        id: find
+        env:
+          # Fine-grained PAT scoped to kfit-app ONLY:
+          #   Contents: read           (check out the source)
+          #   Pull requests: read      (list open PRs)
+          #   Commit statuses: write   (report the result back)
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::KFIT_APP_TOKEN is not set. Create a fine-grained PAT"
+            echo "scoped to ${PRIVATE_REPO} with Contents:read, Pull requests:read,"
+            echo "Commit statuses:write and add it as a secret on this repo."
+            exit 1
+          fi
+
+          ONLY="${{ github.event.inputs.pr || github.event.client_payload.pr || '' }}"
+
+          PRS=$(gh pr list --repo "$PRIVATE_REPO" --state open --base main \
+                  --json number,headRefOid,baseRefOid,title,isDraft --limit 50)
+
+          SELECTED='[]'
+          for row in $(echo "$PRS" | jq -r '.[] | @base64'); do
+            pr() { echo "$row" | base64 -d | jq -r "$1"; }
+            NUM=$(pr .number); SHA=$(pr .headRefOid); BASE=$(pr .baseRefOid)
+            [ "$(pr .isDraft)" = "true" ] && continue
+            if [ -n "$ONLY" ] && [ "$NUM" != "$ONLY" ]; then continue; fi
+
+            # Skip head commits that already carry a verdict. Without this the
+            # poll re-runs the whole suite for every open PR every 10 minutes,
+            # which would burn the public repo's goodwill and swamp the queue.
+            # An explicit workflow_dispatch for one PR overrides that, which is
+            # how you force a re-run.
+            if [ -z "$ONLY" ]; then
+              STATE=$(gh api "repos/$PRIVATE_REPO/commits/$SHA/status" \
+                        --jq --arg c "$CONTEXT" \
+                        '[.statuses[] | select(.context == $c)] | first | .state // "none"' \
+                        2>/dev/null || echo none)
+              case "$STATE" in success|failure|error|pending) continue ;; esac
+            fi
+
+            SELECTED=$(echo "$SELECTED" | jq -c \
+              --argjson n "$NUM" --arg s "$SHA" --arg b "$BASE" \
+              '. + [{pr:$n, sha:$s, base:$b}]')
+          done
+
+          COUNT=$(echo "$SELECTED" | jq 'length')
+          echo "Selected $COUNT PR(s): $SELECTED"
+          echo "matrix=$(echo "$SELECTED" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
+          echo "any=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify PR
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      # One PR at a time. These are free minutes but not infinite runners, and
+      # a serial queue keeps the log readable when several PRs land together.
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Mark the PR as running
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+        run: |
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state=pending \
+            -f context="$CONTEXT" \
+            -f description="Running on the public runner" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-app
+          ref: ${{ matrix.sha }}
+          token: ${{ secrets.KFIT_APP_TOKEN }}
+          fetch-depth: 0
+          # The token must not survive into the workspace git config: any step
+          # after this runs code from the PR, and this token can read the whole
+          # private repo.
+          persist-credentials: false
+
+      - name: Detect changed paths
+        id: changed
+        run: |
+          FILES=$(git diff --name-only "${{ matrix.base }}" "${{ matrix.sha }}")
+          # Deliberately NOT echoed. Logs on a public repo are world-readable,
+          # and a file list is a map of a private codebase.
+          if echo "$FILES" | grep -qE '(\.dart$|^pubspec\.yaml$)'; then
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Changed files: $(echo "$FILES" | wc -l)"
+
+      - name: Secret scan
+        run: |
+          if grep -rIn --include='*.dart' --include='*.yml' --include='*.yaml' \
+             -E '(eyJ[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY|sb_secret_|ghp_[A-Za-z0-9]{20,})' \
+             lib test .github 2>/dev/null | head -5; then
+            echo "::error::Possible credential committed. Failing without printing it."
+            exit 1
+          fi
+          echo "✅ No credential patterns found."
+
+      - name: Keystore regression guard
+        run: |
+          if git ls-files | grep -qiE '\.(jks|keystore)$|key\.properties$'; then
+            echo "::error::Signing material is committed to the repo."
+            exit 1
+          fi
+          echo "✅ No signing material in the tree."
+
+      - name: App identity guard
+        run: |
+          # Changing either breaks every installed app: applicationId makes
+          # Android treat the build as a different app, namespace must match the
+          # package in the committed .kt sources or compilation fails.
+          for v in 'applicationId "com.example.karthik_fitness"' \
+                   'namespace "com.example.karthik_fitness"'; do
+            grep -qF "$v" .github/workflows/build_apk.yml || {
+              echo "::error::build_apk.yml no longer pins: $v"; exit 1; }
+          done
+          echo "✅ applicationId and namespace still pinned."
+
+      - name: Set up Java
+        if: steps.changed.outputs.code == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        if: steps.changed.outputs.code == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.0"
+          channel: stable
+          cache: true
+
+      - name: Cache pub packages
+        if: steps.changed.outputs.code == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.changed.outputs.code == 'true'
+        run: flutter pub get
+
+      - name: Analyze
+        if: steps.changed.outputs.code == 'true'
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        if: steps.changed.outputs.code == 'true'
+        run: flutter test --coverage
+
+      - name: Coverage floor
+        if: steps.changed.outputs.code == 'true'
+        run: |
+          [ -f coverage/lcov.info ] || {
+            echo "::error::coverage/lcov.info missing."; exit 1; }
+          # Generated sources are dropped before measuring: they are machine
+          # written and already exercised through the code that uses them, and
+          # counting them makes the floor punish adding a generated file while a
+          # real drop hides in the noise.
+          awk '/^SF:/ { skip = ($0 ~ /\.g\.dart$/) } !skip' \
+            coverage/lcov.info > coverage/lcov.measured
+          PCT=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{ if(lf>0) printf "%.1f", lh/lf*100; else print "0" }' coverage/lcov.measured)
+          echo "Line coverage: ${PCT}% (floor ${COVERAGE_MIN}%)"
+          if awk "BEGIN{exit !($PCT < $COVERAGE_MIN)}"; then
+            echo "::error::Coverage ${PCT}% is below the ${COVERAGE_MIN}% floor."
+            exit 1
+          fi
+
+      - name: Docs-only PR
+        if: steps.changed.outputs.code == 'false'
+        run: echo "No Dart/pubspec changes — analyze/test skipped; guards still ran."
+
+      # always(), so a failed or cancelled run still reports. Without this a
+      # crash leaves the PR stuck on "pending" forever with nothing coming.
+      - name: Report the verdict back to the private PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          RESULT: ${{ job.status }}
+        run: |
+          case "$RESULT" in
+            success) STATE=success; DESC="Passed on the public runner" ;;
+            cancelled) STATE=error;  DESC="Cancelled" ;;
+            *) STATE=failure; DESC="Failed — see the run log" ;;
+          esac
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state="$STATE" \
+            -f context="$CONTEXT" \
+            -f description="$DESC" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
