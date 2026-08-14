@@ -143,12 +143,23 @@ jobs:
           # at all. A same-named secret in a second repo is not the same
           # credential — that is the trap this comment exists to record.
           #
-          # KFIT_APP_TOKEN is offered as the fallback, but note it is
-          # deliberately Contents:READ, because the gate hands it to a job that
-          # then runs arbitrary code from the PR under test. Widening THAT token
-          # would be the wrong fix: the merge job never executes PR code, so it
-          # is the right place for a write credential, and the gate's token
-          # should stay unable to write.
+          # KFIT_APP_TOKEN is the fallback, and on the first live run it turned
+          # out to be the one that works: it reports PUSH access to kfit-app,
+          # not the Contents:read it is documented as having.
+          #
+          # ⚠️ That is worth a decision rather than being quietly relied on.
+          # private-pr-gate.yml hands this same token to a job that then runs
+          # arbitrary code from the PR under test. The exposure is currently
+          # narrow — the token is in the environment only of the status and
+          # checkout steps, `persist-credentials: false` keeps it out of the
+          # workspace git config, and the analyze/test steps that execute PR
+          # code never see it — but a write-capable credential in a job that
+          # runs untrusted code is not where one belongs.
+          #
+          # The clean end state is a token per purpose: the gate's stays
+          # read-only, and a separate write credential lives here, in a job that
+          # never executes PR code. Until that split is made, this selects
+          # whatever can actually do the work rather than failing on principle.
           TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
           TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
         run: |
@@ -200,13 +211,21 @@ jobs:
             echo "RELEASE_PAT secret needs ${PRIVATE_REPO} with"
             echo "Contents: read and write, plus Pull requests: read and write."
             echo ""
-            echo "Do NOT simply widen KFIT_APP_TOKEN: the quality gate gives that"
-            echo "token to a job that runs arbitrary code from the PR under test,"
-            echo "so it is deliberately read-only. This job never runs PR code,"
-            echo "which is why the write credential belongs to it and not there."
+            echo "Prefer a token dedicated to this job over widening the gate's:"
+            echo "the gate hands its token to a step that runs arbitrary code"
+            echo "from the PR under test, whereas this job never runs PR code."
           fi
 
-          echo "token=$READER"  >> "$GITHUB_OUTPUT"
+          # The WRITER wins when there is one. Exporting READER unconditionally
+          # was a real bug: with a readable-but-unwritable token probed first
+          # and a writable one second, READER stuck on the read-only token
+          # while WRITER named the good one — so every merge 403'd, and because
+          # WRITER was set the run did not consider itself blocked and stayed
+          # GREEN. A silently stalled queue, which is precisely what this
+          # workflow exists to prevent.
+          if [ "$WRITER" != none ]; then USE="$WRITER"; else USE="$READER"; fi
+          echo "Using $USE"
+          echo "token=$USE"    >> "$GITHUB_OUTPUT"
           echo "writer=$WRITER" >> "$GITHUB_OUTPUT"
 
       - name: Sweep open PRs
@@ -229,9 +248,25 @@ jobs:
           GH_TOKEN="${!CHOSEN_TOKEN}"
           export GH_TOKEN
 
-          # With no writable token the sweep still runs, but only to report.
-          # See the preflight for why this is not a hard failure.
+          # Three distinct states, deliberately not collapsed into one flag:
+          #
+          #   USER_DRY   an operator asked for a report. Always exits 0 — the
+          #              previous version reused DRY_RUN for both meanings, so a
+          #              deliberate dry_run=true dispatch failed the job.
+          #   BLOCKED    no token could write, per the preflight probe.
+          #   PERM_DENIED  a merge or update actually came back 403.
+          #
+          # PERM_DENIED exists because the probe cannot be fully trusted:
+          # `.permissions.push` on the repo object reflects the authenticated
+          # user's role, and does not cleanly express a fine-grained PAT's
+          # grants. If it over-reports, WRITER is set, BLOCKED is 0, and every
+          # merge 403s — a green run and a stalled queue. Watching what the API
+          # actually returns makes the loud failure independent of the probe
+          # being right.
+          USER_DRY=0
+          [ "${DRY_RUN:-false}" = "true" ] && USER_DRY=1
           BLOCKED=0
+          PERM_DENIED=0
           if [ "${WRITER:-none}" = "none" ]; then
             BLOCKED=1
             DRY_RUN=true
@@ -427,12 +462,23 @@ jobs:
                   echo "[dry-run] would update PR #$NUM from main"
                   UPDATED=$((UPDATED+1)); continue
                 fi
-                if gh pr update-branch "$NUM" --repo "$PRIVATE_REPO"; then
+                if gh pr update-branch "$NUM" --repo "$PRIVATE_REPO" \
+                     2>"${RUNNER_TEMP:-/tmp}/update_err"; then
                   echo "✅ PR #$NUM updated from main; the gate will re-run against the new head."
                   UPDATED=$((UPDATED+1))
                 else
                   # One failure must not abandon the rest — that reintroduces
                   # the stall this loop exists to fix, with an extra step.
+                  #
+                  # A 403 is not a conflict and must not be reported as one:
+                  # it means the token cannot write, which no amount of
+                  # resolving will fix and which should fail the run.
+                  if grep -q "HTTP 403" "${RUNNER_TEMP:-/tmp}/update_err" 2>/dev/null; then
+                    echo "::warning::PR #$NUM: branch update refused with 403 — the token cannot write to $PRIVATE_REPO."
+                    PERM_DENIED=1
+                    SKIPPED=$((SKIPPED+1))
+                    continue
+                  fi
                   echo "::warning::Could not update PR #$NUM — most likely a conflict with main."
 
                   # Comment at most ONCE per head SHA. The workflow this
@@ -499,7 +545,7 @@ jobs:
             # Rule 18 is enforced in the GATE instead, where it fails the PR and
             # names the commit. See the identity guard in private-pr-gate.yml.
 
-            if gh api "${ARGS[@]}" >/dev/null; then
+            if gh api "${ARGS[@]}" >/dev/null 2>"${RUNNER_TEMP:-/tmp}/merge_err"; then
               echo "✅ Merged PR #$NUM"
               MERGED=$((MERGED+1))
               # delete_branch_on_merge is false on kfit-app, so the branch
@@ -518,20 +564,38 @@ jobs:
               # different (403) and never clears by retrying — so the scope hint
               # is repeated here rather than left in a preflight warning nobody
               # scrolls back to.
-              echo "::notice::PR #$NUM was not merged (state $STATE)."
-              echo "If that was a 405 the PR is simply not ready yet and the next sweep retries."
-              echo "If it was a 403, RELEASE_PAT is missing Contents: write / Pull requests: write on $PRIVATE_REPO."
+              # 405 means "not ready" and is the ordinary case — protection
+              # doing its job. 403 means the token cannot write, which never
+              # clears by retrying and must not be reported as routine.
+              if grep -q "HTTP 403" "${RUNNER_TEMP:-/tmp}/merge_err" 2>/dev/null; then
+                echo "::warning::PR #$NUM: merge refused with 403 — the token cannot write to $PRIVATE_REPO."
+                PERM_DENIED=1
+              else
+                echo "::notice::PR #$NUM was not merged (state $STATE) — protection refused; the next sweep retries."
+              fi
               SKIPPED=$((SKIPPED+1))
             fi
           done
 
           echo "Merged $MERGED, updated $UPDATED, skipped $SKIPPED."
 
-          # The one case worth going red for: work was waiting and the missing
-          # grant is what stopped it. An idle sweep with no token stays green
-          # and quiet, so this failure means something specific every time it
-          # appears rather than being the background state of the repo.
-          if [ "$BLOCKED" -eq 1 ] && [ $((MERGED + UPDATED)) -gt 0 ]; then
-            echo "::error::${MERGED} PR(s) were ready to merge and ${UPDATED} needed updating, but no token here can write to ${PRIVATE_REPO}. See the grant described in the preflight step."
+          # Going red is reserved for "a missing permission actually cost
+          # something". An idle sweep stays green and quiet, so this failure
+          # means one specific thing every time it appears rather than being
+          # the repo's background state.
+          #
+          # A real 403 counts on its own, whatever the preflight probe thought.
+          if [ "$PERM_DENIED" -eq 1 ]; then
+            echo "::error::A merge or branch update was refused with 403: the token in use cannot write to ${PRIVATE_REPO}. See the grant described in the preflight step."
+            exit 1
+          fi
+
+          # An operator-requested dry run is a report and always succeeds; only
+          # a run blocked by a missing token, which found work it could not do,
+          # is a failure. "$MERGED" here counts PRs that reached the merge
+          # attempt, some of which protection might still have refused — the
+          # wording says candidates rather than claiming they were all ready.
+          if [ "$BLOCKED" -eq 1 ] && [ "$USER_DRY" -eq 0 ] && [ $((MERGED + UPDATED)) -gt 0 ]; then
+            echo "::error::${MERGED} merge candidate(s) and ${UPDATED} behind branch(es) were waiting, but no token here can write to ${PRIVATE_REPO}. See the grant described in the preflight step."
             exit 1
           fi
