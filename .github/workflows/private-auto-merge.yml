@@ -71,6 +71,17 @@ on:
   workflow_run:
     workflows: ["Private PR Quality Gate"]
     types: [completed]
+  # Fast path for when the Actions quota resets on 2026-09-01 and the private
+  # side can afford a one-line dispatch job again. Inert until then: sending a
+  # dispatch takes a workflow run in kfit-app, which is exactly what there are
+  # no minutes for.
+  #
+  # This is ADDITIVE. The cron above stays, permanently. Deleting it once
+  # dispatch works would rebuild the precise circular dependency that caused
+  # this outage — the trigger needs minutes at the very moment minutes have run
+  # out. Dispatch for speed, poll for survival.
+  repository_dispatch:
+    types: [private-auto-merge]
   workflow_dispatch:
     inputs:
       pr:
@@ -168,7 +179,7 @@ jobs:
           # line, so interpolating any field a PR can influence turns a title
           # into shell. Nothing below reaches into `${{ }}` for PR data — it all
           # arrives as shell variables from gh.
-          ONLY_PR: ${{ github.event.inputs.pr }}
+          ONLY_PR: ${{ github.event.inputs.pr || github.event.client_payload.pr }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
