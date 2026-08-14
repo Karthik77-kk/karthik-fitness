@@ -210,6 +210,39 @@ jobs:
           grep -q 'namespace "com.example.karthik_fitness"' "$F"     || { echo "::error::namespace must stay com.example.karthik_fitness (must match committed .kt package)."; exit 1; }
           echo "✅ App identity pinned"
 
+      - name: Author identity guard (no AI attribution)
+        run: |
+          # Rule 18: Karthik is the sole author and contributor. GitHub reads
+          # Co-Authored-By trailers and lists whoever they name in the repo's
+          # Contributors graph — which is public-facing on kfit, and is why the
+          # public repo's history had to be squashed once already.
+          #
+          # Nothing enforced this before. The rule was written down, and the
+          # only thing standing between it and main was remembering it; the
+          # documentation asserted a guard that did not exist in any workflow.
+          #
+          # Scoped to the PR's OWN commits (base..head), never the whole
+          # history. kfit-app carries ~190 older commits with these trailers —
+          # known, accepted, and deliberately left alone — so a history-wide
+          # scan would fail every PR forever and be switched off within a day.
+          RANGE="${{ matrix.base }}..${{ matrix.sha }}"
+
+          if git log --format='%B' "$RANGE" \
+               | grep -inE '^[[:space:]]*co-authored-by:.*(claude|anthropic|copilot|openai|gpt-|gemini)'; then
+            echo "::error::A commit in this PR credits an AI as co-author. GitHub counts that as a real repository contributor. Remove the trailer (git rebase -i, or git commit --amend) and force-push."
+            exit 1
+          fi
+
+          # The author/committer lines themselves, for the same reason. Bots
+          # that legitimately open PRs (Dependabot) are not matched: this looks
+          # for AI assistant identities, not for automation in general.
+          if git log --format='%an <%ae>%n%cn <%ce>' "$RANGE" \
+               | grep -inE '(claude|anthropic|copilot|openai)'; then
+            echo "::error::A commit in this PR is authored or committed by an AI identity. Re-author it as Karthik and force-push."
+            exit 1
+          fi
+          echo "✅ No AI attribution in this PR's commits"
+
       - name: Set up Java
         if: steps.changed.outputs.code == 'true'
         uses: actions/setup-java@v5
