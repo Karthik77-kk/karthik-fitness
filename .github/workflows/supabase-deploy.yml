@@ -164,7 +164,11 @@ jobs:
       - name: Record what was deployed
         if: success() && steps.changed.outputs.run == 'true'
         env:
-          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          # Needs Contents:write to move the tag; KFIT_APP_TOKEN is read-only.
+          # See build_apk.yml's marker step for what happens otherwise: a green
+          # step that silently does nothing, and a job that repeats its work
+          # every tick because it never records having done it.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.KFIT_APP_TOKEN }}
         run: |
           set -euo pipefail
           SHA=$(git rev-parse HEAD)

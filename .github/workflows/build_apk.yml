@@ -158,6 +158,32 @@ jobs:
             exit 0
           fi
 
+          # Second, independent stop: has this commit's release already been
+          # published? The marker above is the primary mechanism, but it is
+          # deliberately non-fatal — failing to record a marker must not fail a
+          # release that already shipped — so it CAN silently not happen, and
+          # did on the first real release. Without this, the next poll rebuilds
+          # the same commit and dies at the pre-flight's "release already
+          # exists", once every cron tick, indefinitely.
+          #
+          # Derived, not remembered (Rule 23): the tag is computed the same way
+          # the build computes it, then looked up. If it is already there,
+          # there is nothing to ship.
+          CODE=$(git rev-list --count HEAD)
+          NAME=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | sed 's/+.*//')
+          TAG="v${NAME%.*}.${CODE}"
+          # github.token, not the step's GH_TOKEN: this looks up a release in
+          # THIS repo, while the surrounding step authenticates to kfit-app for
+          # the PR-label lookup. A token scoped to the private repo answers 404
+          # here, which would read as "no release yet" and defeat the guard.
+          if [ "${{ github.event.inputs.force }}" != "true" ] \
+             && GH_TOKEN="${{ github.token }}" gh api "repos/${{ github.repository }}/releases/tags/${TAG}" >/dev/null 2>&1; then
+            echo "mode=skip"   >> "$GITHUB_OUTPUT"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} already published — nothing to ship."
+            exit 0
+          fi
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || \
              [ -z "$BEFORE" ] || \
              ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
@@ -1337,7 +1363,17 @@ jobs:
       - name: Record this commit as built
         if: success() && github.event_name != 'workflow_dispatch'
         env:
-          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          # RELEASE_PAT, not KFIT_APP_TOKEN. Writing a tag needs Contents:write
+          # and KFIT_APP_TOKEN is deliberately read-only (it exists to check
+          # private source out onto a public runner).
+          #
+          # The first real release proved why this matters: the step ran with
+          # the read-only token, could not create the ref, warned, and reported
+          # SUCCESS — because a missing marker is not worth failing a release
+          # that already published. Green, and completely ineffective. The next
+          # poll would then rebuild the same commit and fail on "release
+          # already exists", every 15 minutes, forever.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.KFIT_APP_TOKEN }}
           SHA: ${{ needs.detect.outputs.sha }}
         run: |
           set -euo pipefail
