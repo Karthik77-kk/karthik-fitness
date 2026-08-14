@@ -1,0 +1,230 @@
+name: Nightly database backup
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dumps the cloud database once a day, encrypts it, and commits it here.
+#
+# This is the disaster-recovery half of the sync design. The live database is
+# the working copy; this is the thing that survives it being dropped, corrupted,
+# or billed into suspension. Git gives it versioning for free — every night is a
+# commit, so recovery can target a specific day rather than only "the latest".
+#
+# It also keeps the project alive. A free Supabase project pauses after seven
+# days without database activity, and a paused project means sync silently stops
+# for everyone. A nightly dump IS database activity, so the backup doubles as
+# the thing that prevents the outage it would otherwise have to recover from.
+#
+# The dump is ENCRYPTED before it is committed. It is every user's food log,
+# weight history and body composition; a private repo is an access control, not
+# a reason to store health records in the clear.
+#
+# ## Why the snapshots live in kfit-backups
+#
+# They used to be committed to this repo's main, which could never have worked:
+# main is protected, so the push was rejected every time — verified, the first
+# real run failed with "Protected branch update failed" AFTER the dump and the
+# encryption had both succeeded. Green all the way up to the part that matters.
+# Relaxing the protection to let a robot push to the release branch is not a
+# trade worth making for a backup.
+#
+# They now go to kfit-backups: the private repo that exists for exactly this and
+# already holds the app's own per-device backups. One place to look when
+# something has to be restored, and encrypted blobs — which cannot
+# delta-compress — stay out of the source repo entirely rather than making every
+# future clone drag down a month of snapshots nobody will ever read.
+#
+# ## This is NOT the same thing as the app's device backups
+#
+# `users/` in that repo holds each device's own JSON export, written by the app.
+# `database/` holds this: a dump of the cloud database. They overlap for a
+# signed-in user whose data has synced, and they do not overlap at all for
+# someone who has never signed in — the cloud knows nothing about them, and
+# their device backup is the only copy that exists.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # 20:30 UTC = 02:00 IST. After midnight local, so a day is complete before it
+    # is captured, and late enough that a late meal has already synced.
+    - cron: '30 20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never two at once, and never cancel one in flight — a half-written backup is
+  # worse than a late one.
+  group: nightly-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Dump, encrypt, store
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # Nothing from this repository is read. The dump comes from the database
+      # and the snapshot goes to another repository, so there is deliberately
+      # no checkout at all — and therefore no chance of committing to the wrong
+      # place, which is the failure this workflow already had once.
+
+      - name: Require the secrets, loudly
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN }}
+        run: |
+          # Deliberately a hard failure rather than a graceful skip. A backup
+          # that quietly does not run is indistinguishable from one that does,
+          # right up until the day it is needed — which is the single worst
+          # property a backup system can have. A red job every night until the
+          # secrets exist is the correct amount of annoying.
+          missing=""
+          [ -z "$DB_URL" ] && missing="$missing SUPABASE_DB_URL"
+          [ -z "$PASSPHRASE" ] && missing="$missing BACKUP_PASSPHRASE"
+          [ -z "$BACKUP_TOKEN" ] && missing="$missing GH_BACKUP_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing"
+            echo "Add them under Settings → Secrets and variables → Actions."
+            echo "  SUPABASE_DB_URL     Project Settings → Database → Connection string (URI)"
+            echo "  BACKUP_PASSPHRASE   any long random string; KEEP A COPY —"
+            echo "                      without it the backups cannot be restored."
+            echo "  GH_BACKUP_TOKEN     write access to the kfit-backups repo"
+            exit 1
+          fi
+          # Supabase gives you two connection strings, and only one of them
+          # works from here. The "Direct connection" host resolves to IPv6 ONLY
+          # — verified: db.<ref>.supabase.co has no A record — and GitHub's
+          # runners have no IPv6. Using it produces a connection timeout at 1am
+          # with nothing explaining why, every night, forever.
+          #
+          # The session pooler is IPv4. Checked here rather than left to fail,
+          # because "connection refused" gives no hint which of the two strings
+          # was pasted.
+          case "$DB_URL" in
+            *db.*.supabase.co*)
+              echo "::error::SUPABASE_DB_URL is the DIRECT connection string, which is IPv6-only and unreachable from GitHub runners."
+              echo "Use the SESSION POOLER string instead — green 'Connect' button in the Supabase dashboard:"
+              echo "  postgresql://postgres.<ref>:<password>@aws-N-<region>.pooler.supabase.com:5432/postgres"
+              echo "Note the user is postgres.<ref> (not plain postgres) and the host ends in pooler.supabase.com."
+              exit 1
+              ;;
+          esac
+
+          # Port 6543 is transaction mode, which does not support the session
+          # features pg_dump needs. It connects, then fails partway through the
+          # dump — which is worse than not connecting, because it can leave a
+          # truncated file that looks like a backup.
+          case "$DB_URL" in
+            *:6543/*)
+              echo "::error::SUPABASE_DB_URL uses port 6543 (transaction mode). pg_dump needs SESSION mode — use port 5432."
+              exit 1
+              ;;
+          esac
+
+          echo "✅ secrets present, and the URL is a session-mode pooler connection"
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: latest
+
+      - name: Dump the database
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          mkdir -p backups
+          # Roles and schema are dumped separately from data because restoring
+          # wants them in that order, and because a schema-only diff is
+          # readable in a way a combined dump is not.
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backups/_schema.sql
+          supabase db dump --db-url "$SUPABASE_DB_URL" --data-only -f backups/_data.sql
+
+          # Fail on an empty dump rather than committing one. A zero-byte
+          # backup that overwrites a good one is worse than no backup at all,
+          # and pg_dump can exit 0 having written nothing if the connection
+          # drops at the wrong moment.
+          for f in backups/_schema.sql backups/_data.sql; do
+            if [ ! -s "$f" ]; then
+              echo "::error::$f is empty — refusing to commit a useless backup."
+              exit 1
+            fi
+          done
+          echo "schema $(wc -c < backups/_schema.sql) bytes, data $(wc -c < backups/_data.sql) bytes"
+
+      - name: Encrypt
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          STAMP="$(date -u +%Y-%m-%d)"
+          tar -czf "/tmp/kfit-$STAMP.tar.gz" -C backups _schema.sql _data.sql
+
+          # Written to /tmp, not into the checkout: the next step swaps branches
+          # underneath us, and a snapshot sitting in the working tree would
+          # either be wiped by the clean or carried onto the wrong branch.
+          mkdir -p /tmp/snapshot
+          # AES-256 with a key derived by PBKDF2. -pbkdf2 is not optional here:
+          # without it openssl falls back to a single MD5 round, which turns a
+          # good passphrase into a weak key.
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in "/tmp/kfit-$STAMP.tar.gz" \
+            -out "/tmp/snapshot/kfit-$STAMP.tar.gz.enc" \
+            -pass env:PASSPHRASE
+
+          # The plaintext never reaches a commit.
+          rm -rf backups "/tmp/kfit-$STAMP.tar.gz"
+          echo "encrypted $(wc -c < "/tmp/snapshot/kfit-$STAMP.tar.gz.enc") bytes"
+
+      - name: Store it in kfit-backups
+        env:
+          BACKUP_TOKEN: ${{ secrets.GH_BACKUP_TOKEN }}
+          BACKUP_REPO: Karthik77-kk/kfit-backups
+        run: |
+          git config --global user.name "Karthik M"
+          git config --global user.email "iammrkarthik2002@gmail.com"
+
+          # Shallow: this repo also holds every device's own backups, and none
+          # of that history is needed to add one file.
+          git clone --depth 1 \
+            "https://x-access-token:${BACKUP_TOKEN}@github.com/${BACKUP_REPO}.git" \
+            /tmp/backup-repo 2>&1 | sed "s/${BACKUP_TOKEN}/***/g"
+
+          cd /tmp/backup-repo
+          # `database/` beside the app's `users/`. Same repo, different things:
+          # one is the cloud, the other is what each phone holds.
+          mkdir -p database
+          mv /tmp/snapshot/*.enc database/
+
+          # Keep 30 dailies. Encrypted blobs cannot delta-compress, so an
+          # uncapped pile grows without limit and every clone pays for it.
+          ls -1t database/kfit-*.tar.gz.enc 2>/dev/null | tail -n +31 | while read -r old; do
+            echo "pruning $(basename "$old")"
+            git rm -q --cached "$old" 2>/dev/null || true
+            rm -f "$old"
+          done
+
+          git add -A database/
+          if git diff --cached --quiet; then
+            echo "nothing changed — no commit"
+            exit 0
+          fi
+          git commit -q -m "backup: database snapshot $(date -u +%Y-%m-%d)"
+          # Plain push: this branch has one writer and is not protected. A
+          # failure here is a real failure and should go red.
+          git push origin HEAD 2>&1 | sed "s/${BACKUP_TOKEN}/***/g"
+          echo "pushed to ${BACKUP_REPO}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Nightly database backup"
+            echo ""
+            echo "Stored in \`Karthik77-kk/kfit-backups\` under \`database/\`,"
+            echo "alongside the app's own per-device backups in \`users/\`."
+            echo ""
+            echo "Restore: \`openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000\`"
+            echo "with BACKUP_PASSPHRASE, then \`tar -xzf\`, then psql the two files"
+            echo "in order: _schema.sql, then _data.sql."
+          } >> "$GITHUB_STEP_SUMMARY"

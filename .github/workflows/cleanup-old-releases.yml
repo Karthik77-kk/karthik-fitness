@@ -1,0 +1,62 @@
+name: Cleanup Old Releases (kfit)
+
+# Releases pile up on this distribution repo (every merge to main ships one).
+# Keeps only the newest KEEP releases — deletes the release AND its git tag for
+# everything older.
+#
+# Ported from kfit-app 2026-08-14. It used to run cross-repo with RELEASE_PAT,
+# because it lived in the private repo and reached into this one. Running here,
+# the target IS this repo, so the built-in token does it and there is no PAT to
+# expire. The deletion logic is unchanged.
+#
+# Offset an hour from cleanup-old-runs.yml's Sunday 2 AM UTC slot so the two
+# scheduled jobs don't overlap.
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # Weekly, Sunday 3 AM UTC
+  workflow_dispatch:
+
+env:
+  KEEP: 5
+  TARGET_REPO: ${{ github.repository }}
+
+permissions:
+  # Deleting a release and its tag in THIS repo.
+  contents: write
+
+concurrency:
+  group: cleanup-old-releases
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete old releases + tags (keep newest ${{ env.KEEP }})
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::github.token is empty — can't reach $TARGET_REPO."
+            exit 1
+          fi
+
+          gh api "repos/$TARGET_REPO/releases" --paginate \
+            --jq '.[] | "\(.id)\t\(.tag_name)\t\(.created_at)"' \
+            | sort -t $'\t' -k3 -r > releases.tsv
+
+          total=$(wc -l < releases.tsv)
+          echo "Found $total releases on $TARGET_REPO, keeping newest $KEEP."
+
+          tail -n "+$((KEEP + 1))" releases.tsv | while IFS=$'\t' read -r id tag _created; do
+            echo "Deleting $tag (release id $id)..."
+            gh api -X DELETE "repos/$TARGET_REPO/releases/$id" \
+              || echo "::warning::Failed to delete release $tag (id $id)"
+            gh api -X DELETE "repos/$TARGET_REPO/git/refs/tags/$tag" \
+              || echo "::warning::Failed to delete tag $tag"
+          done
+
+          remaining=$(gh api "repos/$TARGET_REPO/releases" --paginate --jq '.[].tag_name' | wc -l)
+          echo "✅ Cleanup complete. $remaining releases remain on $TARGET_REPO."
