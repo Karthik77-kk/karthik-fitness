@@ -123,57 +123,78 @@ jobs:
       # token cannot write, every merge below fails one at a time with a 403
       # that looks like a branch-protection problem. Better to say so once, in
       # the exact words needed to fix it.
-      - name: Preflight — can this token actually merge?
+      - name: Preflight — pick a token that can actually merge
+        id: preflight
         env:
-          # RELEASE_PAT, not KFIT_APP_TOKEN. Merging a PR and updating a PR
-          # branch BOTH require `Contents: write` as well as
-          # `Pull requests: write` — the merge creates a commit on main and the
-          # update creates one on the head branch. KFIT_APP_TOKEN is
-          # deliberately `Contents: read` (it exists to check the source out
-          # onto a public runner) and cannot do either. A read-only fine-grained
-          # token also tends to report mergeStateStatus as UNKNOWN, so it is not
-          # usable for the read half here either.
+          # BOTH candidates are offered and the usable one is chosen at runtime,
+          # rather than naming a token here and hoping.
           #
-          # RELEASE_PAT already performed exactly these two operations from
-          # inside kfit-app — it was the token behind auto-merge.yml's merge and
-          # update-behind-prs.yml's `gh pr update-branch` — so the capability is
-          # proven, not assumed.
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          # Merging a PR and updating a PR branch both require `Contents: write`
+          # as well as `Pull requests: write` — the merge writes a commit to
+          # main, the update writes one to the head branch. So a read-only token
+          # cannot do this job however the workflow is written.
+          #
+          # The obvious pick was RELEASE_PAT, on the reasoning that it performed
+          # exactly these two operations from inside kfit-app (auto-merge.yml's
+          # merge, update-behind-prs.yml's `gh pr update-branch`). That
+          # reasoning was wrong, and the first live run proved it: BOTH repos
+          # have a secret called RELEASE_PAT and they hold DIFFERENT tokens.
+          # kfit's exists to publish releases TO kfit and cannot read kfit-app
+          # at all. A same-named secret in a second repo is not the same
+          # credential — that is the trap this comment exists to record.
+          #
+          # KFIT_APP_TOKEN is offered as the fallback, but note it is
+          # deliberately Contents:READ, because the gate hands it to a job that
+          # then runs arbitrary code from the PR under test. Widening THAT token
+          # would be the wrong fix: the merge job never executes PR code, so it
+          # is the right place for a write credential, and the gate's token
+          # should stay unable to write.
+          TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
+          TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::RELEASE_PAT is not set on this repo. It is the only"
-            echo "token here with Contents:write + Pull requests:write on"
-            echo "${PRIVATE_REPO}, which merging and branch-updating both need."
-            exit 1
-          fi
-          # Reaching the repo at all is the hard requirement — without it every
-          # call below is a 404 and there is nothing to debug from.
-          if ! gh api "repos/$PRIVATE_REPO" --jq '.full_name' >/dev/null 2>&1; then
-            echo "::error::RELEASE_PAT cannot read ${PRIVATE_REPO}. It needs at"
-            echo "least Contents: read there (and Contents: write to merge)."
-            exit 1
-          fi
 
-          # Push access is reported as a WARNING, never a hard failure. The
-          # `permissions` block is not equally trustworthy across classic and
-          # fine-grained tokens, and a false negative here would block every
-          # merge on a token that is actually fine — a worse outcome than a
-          # merge attempt that returns 405 and retries next sweep. The merge
-          # step below repeats the scope hint if it is ever refused.
-          PUSH=$(gh api "repos/$PRIVATE_REPO" --jq '.permissions.push // false' 2>/dev/null || echo unknown)
-          if [ "$PUSH" = "true" ]; then
-            echo "✅ RELEASE_PAT has write access to $PRIVATE_REPO"
-          else
-            echo "::warning::RELEASE_PAT does not report push access to ${PRIVATE_REPO}"
-            echo "(reported: ${PUSH}). Merging and branch-updating both need"
-            echo "Contents: write + Pull requests: write. Continuing anyway and"
-            echo "letting the API be the authority."
+          # Reports the NAME of the usable token, never its value — a secret
+          # crossing a step boundary through an output is a needless second
+          # place for it to leak from. The sweep re-reads the value itself.
+          CHOSEN=none
+          for NAME in TOK_RELEASE TOK_APP; do
+            VALUE="${!NAME:-}"
+            [ -z "$VALUE" ] && continue
+            PUSH=$(GH_TOKEN="$VALUE" gh api "repos/$PRIVATE_REPO" \
+                     --jq '.permissions.push // false' 2>/dev/null || echo unreachable)
+            case "$PUSH" in
+              true)  echo "✅ $NAME can write to $PRIVATE_REPO"; CHOSEN="$NAME"; break ;;
+              false) echo "· $NAME can read $PRIVATE_REPO but not write" ;;
+              *)     echo "· $NAME cannot reach $PRIVATE_REPO" ;;
+            esac
+          done
+
+          if [ "$CHOSEN" = "none" ]; then
+            echo "::error::No token on this repo can write to ${PRIVATE_REPO}, so nothing can be merged."
+            echo ""
+            echo "Grant ONE of these, in the GitHub web UI (fine-grained PAT"
+            echo "permissions cannot be set through the API):"
+            echo ""
+            echo "  Preferred — the token behind this repo's RELEASE_PAT secret:"
+            echo "    add ${PRIVATE_REPO} with Contents: read and write,"
+            echo "    plus Pull requests: read and write."
+            echo ""
+            echo "  Or create a dedicated token and add it as RELEASE_PAT here."
+            echo ""
+            echo "Do NOT simply widen KFIT_APP_TOKEN: the quality gate gives that"
+            echo "token to a job that runs arbitrary code from the PR under test,"
+            echo "so it is deliberately read-only. This job never runs PR code,"
+            echo "which is why the write credential belongs to it and not there."
+            exit 1
           fi
+          echo "token=$CHOSEN" >> "$GITHUB_OUTPUT"
 
       - name: Sweep open PRs
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
+          TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
+          CHOSEN_TOKEN: ${{ steps.preflight.outputs.token }}
           # Passed through the environment rather than interpolated into the
           # script body. `${{ }}` is substituted textually BEFORE bash sees the
           # line, so interpolating any field a PR can influence turns a title
@@ -183,6 +204,10 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
+
+          # Resolve the token the preflight selected by NAME.
+          GH_TOKEN="${!CHOSEN_TOKEN}"
+          export GH_TOKEN
 
           # Public logs are world-readable. PR numbers and SHAs are printed
           # because they are needed to debug a stuck queue and reveal nothing;
