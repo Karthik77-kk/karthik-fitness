@@ -1,0 +1,52 @@
+name: Cleanup Old Workflow Runs
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly, Sunday 2 AM UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write  # required to delete workflow runs
+
+concurrency:
+  group: cleanup-old-runs
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete old runs (keep newest 5 per workflow)
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            console.log(`Cleaning old workflow runs for ${owner}/${repo}...`);
+
+            // listWorkflowRunsForRepo = ALL runs (listWorkflowRuns needs a workflow_id
+            // and was the bug that made this job throw before any deletion).
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRunsForRepo,
+              { owner, repo, per_page: 100 },
+            );
+
+            // Group by workflow, newest first.
+            const byWorkflow = {};
+            for (const r of runs) (byWorkflow[r.workflow_id] ??= []).push(r);
+
+            let deleted = 0;
+            for (const id of Object.keys(byWorkflow)) {
+              const list = byWorkflow[id]
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              for (const run of list.slice(5)) {          // keep the newest 5
+                if (run.status !== 'completed') continue;  // never touch in-progress
+                try {
+                  await github.rest.actions.deleteWorkflowRun({ owner, repo, run_id: run.id });
+                  deleted++;
+                } catch (e) {
+                  console.log(`skip ${run.id}: ${e.message}`);
+                }
+              }
+            }
+            console.log(`Cleanup complete: deleted ${deleted} old runs.`);

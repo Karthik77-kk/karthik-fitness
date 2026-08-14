@@ -1,0 +1,197 @@
+name: Deploy Supabase functions
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Publishes the Edge Functions in supabase/functions/ to the live project.
+#
+# ## Why this exists
+#
+# Nothing deployed them. The migration/pgTAP suite runs against a LOCAL,
+# throwaway Postgres — which is the right thing for a PR gate and says nothing
+# about what is actually running in production. The database schema reaches the
+# live project through the Supabase GitHub integration; functions do not.
+#
+# The result was a feature that was finished, tested, merged and dead:
+# `signin-with-username` returned NOT_FOUND on the live project, so signing in
+# by username failed for everyone. And it failed as "that username or password
+# is not right" — because sign-in errors are deliberately indistinguishable to
+# avoid username enumeration — so a user with perfectly correct credentials was
+# told they were wrong, with nothing to suggest their email would have worked.
+#
+# ## Why it only acts on main
+#
+# Deploying is not a check; it changes what every installed app talks to. A pull
+# request must never be able to replace a live function, and a function from a
+# branch that is never merged must never outlive it.
+#
+# ## Ported to the public repo, 2026-08-14
+#
+# The deploy steps are unchanged. What moved is the trigger and the source.
+#
+# The original fired on `push` to main with a `paths:` filter on
+# supabase/functions/. A poll has neither. Re-deploying everything on every tick
+# would "work" — `functions deploy` is idempotent — but it would replace live
+# functions several times an hour for no reason, and a deploy that runs
+# constantly is one nobody reads the log of.
+#
+# So the change detection is explicit and exact: compare the git TREE hash of
+# supabase/functions against the tree recorded by the last successful deploy. A
+# tree hash changes if and only if the contents change, which is precisely the
+# question `paths:` was answering.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Offset from the gate, the merge sweep and the release build so the four
+    # do not wake together. Functions change rarely, so this is deliberately
+    # the least frequent of them.
+    - cron: "23 */2 * * *"
+  # Fast path for when the Actions quota resets on 2026-09-01. Additive — the
+  # cron stays, because a dispatch needs minutes in the private repo and that is
+  # exactly what runs out.
+  repository_dispatch:
+    types: [private-functions-deploy]
+  # So a function can be (re)deployed without inventing a commit — which is the
+  # situation this workflow was written in: the code was long since merged and
+  # simply had never been published.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Deploy even if supabase/functions is unchanged"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Queue, never cancel. A half-replaced function is worse than a late one.
+  group: supabase-deploy
+  cancel-in-progress: false
+
+env:
+  PRIVATE_REPO: Karthik77-kk/kfit-app
+  DEPLOY_MARKER: ci/last-fn-deploy
+
+jobs:
+  deploy:
+    name: Deploy Edge Functions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-app
+          ref: main
+          token: ${{ secrets.KFIT_APP_TOKEN }}
+          # Needs the marker tag and enough history to resolve it, so this
+          # cannot be the shallow fetch the original used.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Have the functions actually changed?
+        id: changed
+        run: |
+          set -euo pipefail
+          TREE=$(git rev-parse "HEAD:supabase/functions")
+          PREV=$(git rev-parse -q --verify "refs/tags/${DEPLOY_MARKER}:supabase/functions" 2>/dev/null || true)
+          echo "tree=$TREE" >> "$GITHUB_OUTPUT"
+          if [ -n "$PREV" ] && [ "$PREV" = "$TREE" ] \
+             && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Functions unchanged since the last deploy — nothing to do."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Functions changed (or first run / forced) — deploying."
+          fi
+
+      - name: Require the secrets, loudly
+        if: steps.changed.outputs.run == 'true'
+        env:
+          TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          # A hard failure, not a graceful skip. A deploy that quietly does not
+          # happen is exactly the state this workflow exists to end: the code
+          # merged, the job was green, and the function was not there.
+          missing=""
+          [ -z "$TOKEN" ] && missing="$missing SUPABASE_ACCESS_TOKEN"
+          [ -z "$REF" ] && missing="$missing SUPABASE_PROJECT_REF"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing"
+            echo "  SUPABASE_ACCESS_TOKEN  Supabase dashboard → Account → Access Tokens"
+            echo "  SUPABASE_PROJECT_REF   the <ref> in https://<ref>.supabase.co"
+            exit 1
+          fi
+
+      - name: Install Supabase CLI
+        if: steps.changed.outputs.run == 'true'
+        uses: supabase/setup-cli@v3
+        with:
+          version: latest
+
+      - name: Deploy every function
+        if: steps.changed.outputs.run == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          # Deployed by name rather than with a bare `deploy`, so the log says
+          # which functions were touched and a new directory cannot be published
+          # without appearing in this output.
+          shopt -s nullglob
+          found=0
+          for dir in supabase/functions/*/; do
+            name="$(basename "$dir")"
+            case "$name" in _*) continue ;; esac   # _shared and friends
+            echo "::group::$name"
+            supabase functions deploy "$name" --project-ref "$PROJECT_REF"
+            echo "::endgroup::"
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No functions found under supabase/functions/"
+            exit 1
+          fi
+          echo "deployed $found function(s)"
+
+      # Only after a successful deploy, so a failure is retried next tick rather
+      # than being recorded as done — the same guarantee the release build's
+      # ci/last-built marker gives.
+      - name: Record what was deployed
+        if: success() && steps.changed.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          if gh api -X PATCH "repos/${PRIVATE_REPO}/git/refs/tags/${DEPLOY_MARKER}" \
+               -f sha="$SHA" -F force=true >/dev/null 2>&1; then
+            echo "Marker moved to ${SHA}"
+          elif gh api -X POST "repos/${PRIVATE_REPO}/git/refs" \
+                 -f ref="refs/tags/${DEPLOY_MARKER}" -f sha="$SHA" >/dev/null 2>&1; then
+            echo "Marker created at ${SHA}"
+          else
+            # Not fatal: the functions ARE deployed. The cost is one redundant
+            # redeploy next tick, which is idempotent and visible.
+            echo "::warning::Could not move ${DEPLOY_MARKER}; the next run may redeploy unchanged functions."
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Supabase Edge Functions"
+            echo ""
+            if [ "${{ steps.changed.outputs.run }}" = "true" ]; then
+              echo "Deployed from \`supabase/functions/\` to the live project."
+              echo ""
+              echo "Verify: a missing function answers \`NOT_FOUND\`, so"
+              echo "\`POST /functions/v1/<name>\` returning anything else means it is there."
+            else
+              echo "No change since the last deploy — nothing published."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
