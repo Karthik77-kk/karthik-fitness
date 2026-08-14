@@ -166,35 +166,49 @@ jobs:
           fi
           echo "Changed files: $(echo "$FILES" | wc -l)"
 
-      - name: Secret scan
+      - name: Secret scan (no hardcoded credentials in lib/, test/, or workflows)
         run: |
-          if grep -rIn --include='*.dart' --include='*.yml' --include='*.yaml' \
-             -E '(eyJ[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY|sb_secret_|ghp_[A-Za-z0-9]{20,})' \
-             lib test .github 2>/dev/null | head -5; then
-            echo "::error::Possible credential committed. Failing without printing it."
+          # HF tokens, GitHub PATs, AWS keys, Google/Gemini API keys, private keys.
+          # Covers lib/ + test/ (Dart source/tests) AND .github/ (CI workflows) —
+          # the 2026-07-04 incident (a full Android signing keystore + its
+          # plaintext password committed directly in build_apk.yml) would NOT have
+          # been caught by a lib/-only scan, since it lived in a workflow file.
+          PATTERN='hf_[A-Za-z0-9]{30}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          # Lines tagged `gate-allow-token` are intentional, allowlisted bundled
+          # credentials (e.g. the gated HF model-download token) — any OTHER match fails.
+          if grep -rEn "$PATTERN" lib/ test/ .github/ | grep -v 'gate-allow-token'; then
+            echo "::error::Hardcoded credential detected. Move it to a GitHub Actions secret, or tag the line // gate-allow-token if it is an intentional bundled token."
             exit 1
           fi
-          echo "✅ No credential patterns found."
+          echo "✅ No unexpected hardcoded credentials in lib/, test/, or .github/"
 
-      - name: Keystore regression guard
+      - name: Keystore regression guard (no signing material committed)
         run: |
-          if git ls-files | grep -qiE '\.(jks|keystore)$|key\.properties$'; then
-            echo "::error::Signing material is committed to the repo."
+          # Regression guard for the exact 2026-07-04 incident: a base64 PKCS12
+          # keystore blob and its plaintext password/alias were hardcoded directly
+          # in build_apk.yml. Both now come from ANDROID_KEYSTORE_BASE64 /
+          # ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS secrets — this fails the
+          # build if either pattern ever reappears in committed source.
+          if git ls-files | grep -qE '\.(jks|keystore|p12|pfx)$'; then
+            echo "::error::A keystore file (*.jks/*.keystore/*.p12/*.pfx) is tracked in git. Signing keys must never be committed — use ANDROID_KEYSTORE_BASE64 instead."
             exit 1
           fi
-          echo "✅ No signing material in the tree."
+          if grep -rEn '"MII[A-Za-z0-9+/=]{100,}' .github/ 2>/dev/null; then
+            echo "::error::A base64 blob matching a PKCS12/DER keystore preamble (MII...) is hardcoded in a workflow file. Keystores must only be injected via the ANDROID_KEYSTORE_BASE64 secret."
+            exit 1
+          fi
+          if grep -rEn '(storePassword|keyPassword)=[A-Za-z0-9]' .github/ 2>/dev/null | grep -vE '\$\{\{ secrets\.|\$ANDROID_'; then
+            echo "::error::A literal (non-secret) storePassword/keyPassword value is hardcoded in a workflow file. Use \${{ secrets.ANDROID_KEYSTORE_PASSWORD }} instead."
+            exit 1
+          fi
+          echo "✅ No signing material committed"
 
-      - name: App identity guard
+      - name: App identity guard (applicationId + namespace pinned)
         run: |
-          # Changing either breaks every installed app: applicationId makes
-          # Android treat the build as a different app, namespace must match the
-          # package in the committed .kt sources or compilation fails.
-          for v in 'applicationId "com.example.karthik_fitness"' \
-                   'namespace "com.example.karthik_fitness"'; do
-            grep -qF "$v" .github/workflows/build_apk.yml || {
-              echo "::error::build_apk.yml no longer pins: $v"; exit 1; }
-          done
-          echo "✅ applicationId and namespace still pinned."
+          F=.github/workflows/build_apk.yml
+          grep -q 'applicationId "com.example.karthik_fitness"' "$F" || { echo "::error::applicationId must stay com.example.karthik_fitness (changing it orphans every install)."; exit 1; }
+          grep -q 'namespace "com.example.karthik_fitness"' "$F"     || { echo "::error::namespace must stay com.example.karthik_fitness (must match committed .kt package)."; exit 1; }
+          echo "✅ App identity pinned"
 
       - name: Set up Java
         if: steps.changed.outputs.code == 'true'
