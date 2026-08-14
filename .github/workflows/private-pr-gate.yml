@@ -271,3 +271,106 @@ jobs:
             -f context="$CONTEXT" \
             -f description="$DESC" \
             -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # The SECOND required context on kfit-app/main. Both must report before a PR
+  # can merge, so porting only the Dart gate would have left every PR blocked
+  # while looking like the migration had worked.
+  #
+  # Safe to run here: it stands up a LOCAL Supabase stack and tests against
+  # that. It needs no production credentials, touches no live database, and so
+  # gives a public runner nothing worth stealing.
+  verify-supabase:
+    name: Verify migrations
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    env:
+      SUPABASE_CONTEXT: Migrations + RLS tests
+    steps:
+      - name: Mark the PR as running
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+        run: |
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state=pending \
+            -f context="$SUPABASE_CONTEXT" \
+            -f description="Running on the public runner" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-app
+          ref: ${{ matrix.sha }}
+          token: ${{ secrets.KFIT_APP_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect changed paths
+        id: changed
+        run: |
+          FILES=$(git diff --name-only "${{ matrix.base }}" "${{ matrix.sha }}")
+          if echo "$FILES" | grep -qE '^supabase/'; then
+            echo "supabase=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "supabase=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Supabase CLI
+        if: steps.changed.outputs.supabase == 'true'
+        uses: supabase/setup-cli@v3
+        with:
+          version: latest
+
+      - name: Start local Supabase
+        if: steps.changed.outputs.supabase == 'true'
+        run: supabase db start
+
+      - name: Verify migrations are idempotent and complete
+        if: steps.changed.outputs.supabase == 'true'
+        run: supabase db reset
+
+      - name: Run pgTAP tests
+        if: steps.changed.outputs.supabase == 'true'
+        run: supabase test db
+
+      - name: Fail if the schema drifted from the migrations
+        if: steps.changed.outputs.supabase == 'true'
+        run: |
+          diff_output="$(supabase db diff --local || true)"
+          if [ -n "$diff_output" ]; then
+            echo "::error::The local schema does not match the migrations."
+            echo "$diff_output"
+            exit 1
+          fi
+          echo "✅ Schema matches the migrations."
+
+      - name: Stop local Supabase
+        if: always() && steps.changed.outputs.supabase == 'true'
+        run: supabase stop --no-backup || true
+
+      - name: Nothing to verify
+        if: steps.changed.outputs.supabase == 'false'
+        run: echo "No supabase/ changes — migration verification skipped."
+
+      - name: Report the verdict back to the private PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_APP_TOKEN }}
+          RESULT: ${{ job.status }}
+        run: |
+          case "$RESULT" in
+            success) STATE=success; DESC="Passed on the public runner" ;;
+            cancelled) STATE=error;  DESC="Cancelled" ;;
+            *) STATE=failure; DESC="Failed — see the run log" ;;
+          esac
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state="$STATE" \
+            -f context="$SUPABASE_CONTEXT" \
+            -f description="$DESC" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
