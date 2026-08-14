@@ -157,44 +157,64 @@ jobs:
           # Reports the NAME of the usable token, never its value — a secret
           # crossing a step boundary through an output is a needless second
           # place for it to leak from. The sweep re-reads the value itself.
-          CHOSEN=none
+          WRITER=none
+          READER=none
           for NAME in TOK_RELEASE TOK_APP; do
             VALUE="${!NAME:-}"
             [ -z "$VALUE" ] && continue
             PUSH=$(GH_TOKEN="$VALUE" gh api "repos/$PRIVATE_REPO" \
                      --jq '.permissions.push // false' 2>/dev/null || echo unreachable)
             case "$PUSH" in
-              true)  echo "✅ $NAME can write to $PRIVATE_REPO"; CHOSEN="$NAME"; break ;;
-              false) echo "· $NAME can read $PRIVATE_REPO but not write" ;;
-              *)     echo "· $NAME cannot reach $PRIVATE_REPO" ;;
+              true)
+                echo "✅ $NAME can write to $PRIVATE_REPO"
+                [ "$READER" = none ] && READER="$NAME"
+                WRITER="$NAME"; break ;;
+              false)
+                echo "· $NAME can read $PRIVATE_REPO but not write"
+                [ "$READER" = none ] && READER="$NAME" ;;
+              *)
+                echo "· $NAME cannot reach $PRIVATE_REPO" ;;
             esac
           done
 
-          if [ "$CHOSEN" = "none" ]; then
-            echo "::error::No token on this repo can write to ${PRIVATE_REPO}, so nothing can be merged."
-            echo ""
-            echo "Grant ONE of these, in the GitHub web UI (fine-grained PAT"
-            echo "permissions cannot be set through the API):"
-            echo ""
-            echo "  Preferred — the token behind this repo's RELEASE_PAT secret:"
-            echo "    add ${PRIVATE_REPO} with Contents: read and write,"
-            echo "    plus Pull requests: read and write."
-            echo ""
-            echo "  Or create a dedicated token and add it as RELEASE_PAT here."
+          # No token can even READ: nothing here can work, and that is worth
+          # failing on immediately whatever the queue looks like.
+          if [ "$READER" = none ]; then
+            echo "::error::No token on this repo can reach ${PRIVATE_REPO}."
+            exit 1
+          fi
+
+          # A writable token is missing but a readable one exists. Do NOT fail
+          # here. This job runs on a 10-minute cron, so failing on a missing
+          # grant would post ~144 failed runs a day, nearly all of them for
+          # sweeps that had nothing to do anyway — and noise at that rate is how
+          # a real failure stops being noticed.
+          #
+          # Instead the sweep runs read-only and goes red ONLY if it finds work
+          # it could not perform. Silent while idle, loud the moment the missing
+          # grant actually costs something.
+          if [ "$WRITER" = none ]; then
+            echo "::warning::No token here can write to ${PRIVATE_REPO}; running read-only."
+            echo "Grant, in the GitHub web UI (fine-grained PAT permissions"
+            echo "cannot be set through the API): the token behind this repo's"
+            echo "RELEASE_PAT secret needs ${PRIVATE_REPO} with"
+            echo "Contents: read and write, plus Pull requests: read and write."
             echo ""
             echo "Do NOT simply widen KFIT_APP_TOKEN: the quality gate gives that"
             echo "token to a job that runs arbitrary code from the PR under test,"
             echo "so it is deliberately read-only. This job never runs PR code,"
             echo "which is why the write credential belongs to it and not there."
-            exit 1
           fi
-          echo "token=$CHOSEN" >> "$GITHUB_OUTPUT"
+
+          echo "token=$READER"  >> "$GITHUB_OUTPUT"
+          echo "writer=$WRITER" >> "$GITHUB_OUTPUT"
 
       - name: Sweep open PRs
         env:
           TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
           TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
           CHOSEN_TOKEN: ${{ steps.preflight.outputs.token }}
+          WRITER: ${{ steps.preflight.outputs.writer }}
           # Passed through the environment rather than interpolated into the
           # script body. `${{ }}` is substituted textually BEFORE bash sees the
           # line, so interpolating any field a PR can influence turns a title
@@ -208,6 +228,14 @@ jobs:
           # Resolve the token the preflight selected by NAME.
           GH_TOKEN="${!CHOSEN_TOKEN}"
           export GH_TOKEN
+
+          # With no writable token the sweep still runs, but only to report.
+          # See the preflight for why this is not a hard failure.
+          BLOCKED=0
+          if [ "${WRITER:-none}" = "none" ]; then
+            BLOCKED=1
+            DRY_RUN=true
+          fi
 
           # Public logs are world-readable. PR numbers and SHAs are printed
           # because they are needed to debug a stuck queue and reveal nothing;
@@ -498,3 +526,12 @@ jobs:
           done
 
           echo "Merged $MERGED, updated $UPDATED, skipped $SKIPPED."
+
+          # The one case worth going red for: work was waiting and the missing
+          # grant is what stopped it. An idle sweep with no token stays green
+          # and quiet, so this failure means something specific every time it
+          # appears rather than being the background state of the repo.
+          if [ "$BLOCKED" -eq 1 ] && [ $((MERGED + UPDATED)) -gt 0 ]; then
+            echo "::error::${MERGED} PR(s) were ready to merge and ${UPDATED} needed updating, but no token here can write to ${PRIVATE_REPO}. See the grant described in the preflight step."
+            exit 1
+          fi
