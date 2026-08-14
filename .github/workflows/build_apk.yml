@@ -1365,7 +1365,18 @@ jobs:
         env:
           # RELEASE_PAT, not KFIT_APP_TOKEN. Writing a tag needs Contents:write
           # and KFIT_APP_TOKEN is deliberately read-only (it exists to check
-          # private source out onto a public runner).
+          # private source out onto a public runner). RELEASE_PAT's write access
+          # to kfit-app is proven by real merges from private-auto-merge.yml,
+          # not by the permissions probe, which lies for fine-grained PATs.
+          #
+          # The `||` fallback is a formality: if RELEASE_PAT is unset there is
+          # no writable token here at all and the marker cannot be written. That
+          # is survivable — see the detect job's second stop — but it means the
+          # build-mode classification degrades to "no valid base → full
+          # release", which ships an APK for docs-only merges. If the marker is
+          # ever missing, recreate it rather than leaving it to heal:
+          #   gh api -X POST repos/<private>/git/refs \
+          #     -f ref=refs/tags/ci/last-built -f sha=<main HEAD>
           #
           # The first real release proved why this matters: the step ran with
           # the read-only token, could not create the ref, warned, and reported
