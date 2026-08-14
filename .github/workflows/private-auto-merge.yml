@@ -134,27 +134,29 @@ jobs:
           # main, the update writes one to the head branch. So a read-only token
           # cannot do this job however the workflow is written.
           #
-          # The obvious pick was RELEASE_PAT, on the reasoning that it performed
-          # exactly these two operations from inside kfit-app (auto-merge.yml's
-          # merge, update-behind-prs.yml's `gh pr update-branch`). That
-          # reasoning was wrong, and the first live run proved it: BOTH repos
-          # have a secret called RELEASE_PAT and they hold DIFFERENT tokens.
-          # kfit's exists to publish releases TO kfit and cannot read kfit-app
-          # at all. A same-named secret in a second repo is not the same
-          # credential — that is the trap this comment exists to record.
+          # CURRENT STATE (2026-08-14): RELEASE_PAT is the one that works.
+          # Proven by real merges, not by a probe — PRs #151 and #152 were
+          # merged by this workflow, logging `Using TOK_RELEASE / ✅ Merged`.
+          # KFIT_APP_TOKEN is Contents:read and cannot merge.
           #
-          # KFIT_APP_TOKEN is the fallback, and it is NOT sufficient: it is
-          # Contents:read, exactly as documented. Its `.permissions.push` says
-          # true, which is why the first production run selected it and then
-          # took a 403 on the merge — see the probe comment below.
+          # Two traps this pair cost a session to learn, both worth keeping:
           #
-          # So neither existing secret can merge, and this workflow cannot work
-          # until one of them is granted Contents:write + Pull requests:write on
-          # kfit-app. The right one to widen is the token behind kfit's
-          # RELEASE_PAT (or a new dedicated secret) — NOT KFIT_APP_TOKEN, which
-          # private-pr-gate.yml hands to a job that runs arbitrary code from the
-          # PR under test. This job never runs PR code, which is why the write
-          # credential belongs here and not there.
+          # 1. A same-named secret in a second repo is a DIFFERENT credential.
+          #    `kfit`'s original RELEASE_PAT existed to publish releases TO
+          #    `kfit` and could not read `kfit-app` at all, even though a secret
+          #    of that name on `kfit-app` merged PRs there for months. It was
+          #    replaced with a token scoped to both repos; that is why this
+          #    works now, and nothing about the name told anyone.
+          # 2. `.permissions.push` reported KFIT_APP_TOKEN as writable and the
+          #    very next merge returned 403 — see the probe comment below.
+          #
+          # Both are offered and chosen at runtime rather than named here, so a
+          # future re-scoping fixes itself instead of needing this edited.
+          #
+          # If a write credential is ever needed again, widen the one behind
+          # RELEASE_PAT — NOT KFIT_APP_TOKEN, which private-pr-gate.yml hands to
+          # a job that runs arbitrary code from the PR under test. This job
+          # never runs PR code, which is why the write credential belongs here.
           TOK_RELEASE: ${{ secrets.RELEASE_PAT }}
           TOK_APP: ${{ secrets.KFIT_APP_TOKEN }}
         run: |
