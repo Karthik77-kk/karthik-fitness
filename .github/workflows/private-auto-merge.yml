@@ -1,0 +1,393 @@
+name: Private Auto-merge
+
+# Merges kfit-app's green PRs from HERE, in the public repo.
+#
+# Why this exists: kfit-app's own `auto-merge.yml` had to be disabled on
+# 2026-08-14. The account hit 3,000/3,000 Actions minutes, so every private
+# workflow began failing *before starting*, and the dead FAILURE check-runs it
+# left behind outranked the passing StatusContexts the public gate posts — a PR
+# stayed blocked while showing green. Disabling it was necessary and it removed
+# the only thing that merged anything: PRs now go green and sit there.
+#
+# `update-behind-prs.yml` died with it, because it only ever acted on PRs that
+# were already armed for native auto-merge, and nothing arms them now.
+#
+# This workflow replaces BOTH. It is the third leg of the migration, after
+# private-pr-gate.yml (which produces the two required statuses).
+#
+# ── Why it POLLS ────────────────────────────────────────────────────────────
+# Same reason as the gate, and worth restating so nobody rebuilds it the
+# obvious way: a `repository_dispatch` from the private repo needs a workflow
+# run IN the private repo, which needs minutes, and there are none. The trigger
+# is circular at exactly the moment it is needed. Polling needs zero private
+# minutes and is computed from real state rather than a trigger someone has to
+# keep wired up (Rule 23).
+#
+# ── What this does NOT do, on purpose ───────────────────────────────────────
+# It does not call `enablePullRequestAutoMerge`. The private version did, and
+# that is what deadlocked #145: the arming job's OWN check-run counted toward
+# the PR's status, so once it registered, the PR could not become stable while
+# the job was still polling for stability. It waited out its whole budget, and
+# its failure then kept the PR unstable. It only ever worked when the first
+# attempt beat its own check-run into existence — a race it won on one PR and
+# lost on the next with an identical diff.
+#
+# Running from a different repo removes that failure by construction. Nothing
+# this workflow does attaches a check-run to the private PR, so there is no
+# self-reference to deadlock on, no retry budget to tune, and no coupling
+# between a timeout and a retry count. It just asks whether the PR is ready and
+# merges it.
+#
+# ── Branch protection stays the authority ───────────────────────────────────
+# mergeStateStatus is used only as a cheap pre-filter. The merge itself is an
+# ordinary API call against a branch with `enforce_admins: true`, so protection
+# re-checks the required contexts and the up-to-date requirement server-side and
+# returns 405 if they are not met. This CANNOT push a red PR through, and it
+# deliberately does not re-implement the list of required checks — reading that
+# list would need admin scope, and a hardcoded copy is exactly the kind of
+# literal that goes stale silently (Rule 23).
+#
+# ── Keep this repo active ───────────────────────────────────────────────────
+# GitHub disables scheduled workflows in a PUBLIC repo after 60 days with no
+# repository activity, and a cron run does not itself count as activity. What
+# keeps kfit active is releases being published to it — so once build_apk.yml
+# moves here, this is self-sustaining. Until then, a push to kfit resets it.
+
+on:
+  schedule:
+    # Offset from private-pr-gate.yml's "*/10" so a sweep tends to land a few
+    # minutes AFTER a gate run has posted its verdicts, rather than racing it.
+    # GitHub's scheduler is best-effort and drifts under load, so this is a
+    # floor on latency, not a promise.
+    - cron: "4-59/10 * * * *"
+  # The low-latency path. The moment the gate finishes is the moment a PR can
+  # become mergeable, so that is when to look instead of waiting for the next
+  # tick. `completed` fires on failure too, which is fine and cheap: the sweep
+  # simply finds nothing eligible.
+  workflow_run:
+    workflows: ["Private PR Quality Gate"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to act on (blank = every eligible open PR)"
+        required: false
+      dry_run:
+        description: "Report what would happen without merging or updating"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # NOT cancel-in-progress. Two sweeps racing would update or merge the same PR
+  # twice, and cancelling a running sweep loses whatever it had already decided.
+  group: private-auto-merge
+  cancel-in-progress: false
+
+# GITHUB_TOKEN is not used to reach the private repo at all — it has no access
+# there. It is left read-only so nothing can quietly start depending on it.
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPO: Karthik77-kk/kfit-app
+  # Safety valve, ported from update-behind-prs.yml. Updating N behind PRs
+  # starts N gate runs of which N-1 are wasted, because the first to merge puts
+  # the rest behind again. The cap bounds that; whatever it leaves is picked up
+  # next sweep. It is NOT the reason to update only one — doing exactly one is
+  # what starved #142 and #144 behind a single stuck PR.
+  MAX_UPDATES: "6"
+
+jobs:
+  sweep:
+    name: Merge green PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Fast, high-signal, and BEFORE any of the real work (Rule 24): if the
+      # token cannot write, every merge below fails one at a time with a 403
+      # that looks like a branch-protection problem. Better to say so once, in
+      # the exact words needed to fix it.
+      - name: Preflight — can this token actually merge?
+        env:
+          # RELEASE_PAT, not KFIT_APP_TOKEN. Merging a PR and updating a PR
+          # branch BOTH require `Contents: write` as well as
+          # `Pull requests: write` — the merge creates a commit on main and the
+          # update creates one on the head branch. KFIT_APP_TOKEN is
+          # deliberately `Contents: read` (it exists to check the source out
+          # onto a public runner) and cannot do either. A read-only fine-grained
+          # token also tends to report mergeStateStatus as UNKNOWN, so it is not
+          # usable for the read half here either.
+          #
+          # RELEASE_PAT already performed exactly these two operations from
+          # inside kfit-app — it was the token behind auto-merge.yml's merge and
+          # update-behind-prs.yml's `gh pr update-branch` — so the capability is
+          # proven, not assumed.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_PAT is not set on this repo. It is the only"
+            echo "token here with Contents:write + Pull requests:write on"
+            echo "${PRIVATE_REPO}, which merging and branch-updating both need."
+            exit 1
+          fi
+          # Reaching the repo at all is the hard requirement — without it every
+          # call below is a 404 and there is nothing to debug from.
+          if ! gh api "repos/$PRIVATE_REPO" --jq '.full_name' >/dev/null 2>&1; then
+            echo "::error::RELEASE_PAT cannot read ${PRIVATE_REPO}. It needs at"
+            echo "least Contents: read there (and Contents: write to merge)."
+            exit 1
+          fi
+
+          # Push access is reported as a WARNING, never a hard failure. The
+          # `permissions` block is not equally trustworthy across classic and
+          # fine-grained tokens, and a false negative here would block every
+          # merge on a token that is actually fine — a worse outcome than a
+          # merge attempt that returns 405 and retries next sweep. The merge
+          # step below repeats the scope hint if it is ever refused.
+          PUSH=$(gh api "repos/$PRIVATE_REPO" --jq '.permissions.push // false' 2>/dev/null || echo unknown)
+          if [ "$PUSH" = "true" ]; then
+            echo "✅ RELEASE_PAT has write access to $PRIVATE_REPO"
+          else
+            echo "::warning::RELEASE_PAT does not report push access to ${PRIVATE_REPO}"
+            echo "(reported: ${PUSH}). Merging and branch-updating both need"
+            echo "Contents: write + Pull requests: write. Continuing anyway and"
+            echo "letting the API be the authority."
+          fi
+
+      - name: Sweep open PRs
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          # Passed through the environment rather than interpolated into the
+          # script body. `${{ }}` is substituted textually BEFORE bash sees the
+          # line, so interpolating any field a PR can influence turns a title
+          # into shell. Nothing below reaches into `${{ }}` for PR data — it all
+          # arrives as shell variables from gh.
+          ONLY_PR: ${{ github.event.inputs.pr }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Public logs are world-readable. PR numbers and SHAs are printed
+          # because they are needed to debug a stuck queue and reveal nothing;
+          # titles, branch names and changed files are NEVER printed, because
+          # together they are a map of a private codebase.
+          PRS=$(gh pr list --repo "$PRIVATE_REPO" --state open --base main \
+                  --limit 50 \
+                  --json number,headRefOid,headRefName,isDraft,isCrossRepository,title,author,mergeStateStatus)
+
+          TOTAL=$(echo "$PRS" | jq 'length')
+          echo "Open PRs: $TOTAL"
+          if [ "$TOTAL" -eq 0 ]; then echo "Nothing to do."; exit 0; fi
+
+          MERGED=0; UPDATED=0; SKIPPED=0
+
+          for row in $(echo "$PRS" | jq -r '.[] | @base64'); do
+            get() { echo "$row" | base64 -d | jq -r "$1"; }
+            NUM=$(get .number)
+            SHA=$(get .headRefOid)
+            DRAFT=$(get .isDraft)
+            FORK=$(get .isCrossRepository)
+            AUTHOR=$(get .author.login)
+            STATE=$(get .mergeStateStatus)
+            HEAD_REF=$(get .headRefName)
+            TITLE=$(get .title)
+
+            if [ -n "${ONLY_PR:-}" ] && [ "$NUM" != "$ONLY_PR" ]; then continue; fi
+
+            # ── Eligibility ──────────────────────────────────────────────────
+            # Ported from auto-merge.yml's `if:` block. It lives in ONE place
+            # and both the merge path and the update path read it. The private
+            # pair could keep them apart because update-behind-prs.yml filtered
+            # on `autoMergeRequest != null`, which subsumed every rule below —
+            # there is no such marker here, so a second copy would be a second
+            # thing to drift.
+
+            # Draft is the primary guard.
+            if [ "$DRAFT" = "true" ]; then
+              echo "PR #$NUM: draft — skipped"; SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            # Dependabot merges by hand (Rule 21): a toolchain bump must never
+            # auto-ship a release.
+            if [ "$AUTHOR" = "dependabot[bot]" ]; then
+              echo "PR #$NUM: dependabot — merges by hand"; SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            # Title markers, secondary to draft status. These are MARKERS, not
+            # bare substrings: GitHub Actions' contains() is a case-insensitive
+            # substring test, so a plain `contains(title,'wip')` also matches
+            # "Swipeable" and "Wiped". PR #58 ("Swipeable workout tabs…")
+            # silently skipped auto-merge for exactly that, and the failure is
+            # invisible — the job reports success and the PR just sits there.
+            # `wip:` as a prefix and `[wip]` as a bracketed tag cannot collide
+            # with prose. Lowercased here to keep Actions' case-insensitivity.
+            LT=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]')
+            case "$LT" in
+              wip:*|*"[wip]"*|*"do not merge"*|*"[skip auto-merge]"*)
+                echo "PR #$NUM: title asks to skip auto-merge"; SKIPPED=$((SKIPPED+1)); continue ;;
+            esac
+
+            # Schema migrations merge by hand. The Supabase GitHub integration
+            # deploys `main` to PRODUCTION, so merging a PR that touches
+            # supabase/migrations/ APPLIES it to the live database. There is no
+            # preview branch to catch a mistake first, and a destructive
+            # migration against real health data is not something an automation
+            # should do unattended.
+            #
+            # migrations/ ONLY — not all of supabase/. Edge functions and local
+            # config are revertible and destroy nothing, and an over-broad guard
+            # is one people learn to wave through. The private version first
+            # fired on a PR that only added an edge function: nothing it was
+            # built to protect against.
+            #
+            # Paginated REST rather than the file list gh embeds in `pr list`,
+            # which caps at 100 and would silently miss a migration in a large
+            # PR — a guard that fails open is worse than no guard.
+            #
+            # Collected into a variable and matched with a here-string rather
+            # than piped straight into `grep -q`. Under `pipefail` a `grep -q`
+            # exits on its first match, the upstream `gh` takes SIGPIPE, and the
+            # PIPELINE reports 141 — so the `if` would read FALSE precisely when
+            # a migration WAS found. That failure mode is silent and it fails
+            # open, which for this guard means auto-merging a production schema
+            # change.
+            PR_FILES=$(gh api --paginate "repos/$PRIVATE_REPO/pulls/$NUM/files" \
+                         --jq '.[].filename')
+            if grep -q '^supabase/migrations/' <<< "$PR_FILES"; then
+              echo "PR #$NUM: touches schema migrations — merges by hand"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            # ── Act ──────────────────────────────────────────────────────────
+            # GitHub computes mergeability lazily, so the first read of a PR
+            # that has just changed can legitimately be UNKNOWN. Asking once
+            # more a few seconds later is the documented way to let it settle;
+            # if it is still UNKNOWN we fall through and let the merge attempt
+            # be the answer.
+            if [ "$STATE" = "UNKNOWN" ]; then
+              sleep 5
+              STATE=$(gh pr view "$NUM" --repo "$PRIVATE_REPO" \
+                        --json mergeStateStatus --jq .mergeStateStatus)
+            fi
+
+            case "$STATE" in
+              DIRTY)
+                # A real conflict needs a person. An automation guessing at
+                # someone else's merge resolution is how work gets lost.
+                echo "::warning::PR #$NUM has conflicts with main and needs a manual merge."
+                SKIPPED=$((SKIPPED+1)); continue ;;
+
+              BLOCKED)
+                # Required checks not green yet (or not yet reported). Normal
+                # while the gate is still running.
+                echo "PR #$NUM: blocked on required checks — waiting"
+                SKIPPED=$((SKIPPED+1)); continue ;;
+
+              BEHIND)
+                # `strict: true` on kfit-app/main means a behind PR cannot
+                # merge, and GitHub's native auto-merge never updates a branch
+                # itself — it just waits, forever. So the moment one PR merges,
+                # every other open PR is BEHIND and stuck.
+                #
+                # EVERY behind PR gets updated, not just the first. Doing one
+                # per run deadlocks: the queue is only drained by a push to
+                # main, a push only happens when something merges, and nothing
+                # merges while it is behind — so one un-updatable PR at the head
+                # starves every PR behind it. That is what stalled #142 and
+                # #144, both of which had to be done by hand.
+                if [ "$UPDATED" -ge "$MAX_UPDATES" ]; then
+                  echo "::notice::PR #$NUM is behind but the update cap is reached; next sweep will take it."
+                  SKIPPED=$((SKIPPED+1)); continue
+                fi
+                if [ "${DRY_RUN:-false}" = "true" ]; then
+                  echo "[dry-run] would update PR #$NUM from main"
+                  UPDATED=$((UPDATED+1)); continue
+                fi
+                if gh pr update-branch "$NUM" --repo "$PRIVATE_REPO"; then
+                  echo "✅ PR #$NUM updated from main; the gate will re-run against the new head."
+                  UPDATED=$((UPDATED+1))
+                else
+                  # One failure must not abandon the rest — that reintroduces
+                  # the stall this loop exists to fix, with an extra step.
+                  echo "::warning::Could not update PR #$NUM — most likely a conflict with main."
+                  gh pr comment "$NUM" --repo "$PRIVATE_REPO" --body \
+                    "This branch could not be updated from \`main\` automatically, which usually means a real conflict. Merge \`main\` in locally, resolve it, and push — the gate will re-run and this will finish the job." \
+                    || true
+                  SKIPPED=$((SKIPPED+1))
+                fi
+                continue ;;
+            esac
+
+            # CLEAN, UNSTABLE, HAS_HOOKS, or still UNKNOWN.
+            #
+            # UNSTABLE means some non-required check is pending or failed while
+            # the required ones are green. Attempting the merge there is
+            # deliberate and matches what native auto-merge did: branch
+            # protection gates on the REQUIRED contexts, so this merges exactly
+            # what GitHub would have merged on its own. And attempting is safe
+            # in every case — if protection is not satisfied the API returns 405
+            # and nothing happens.
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "[dry-run] would merge PR #$NUM (state $STATE)"
+              MERGED=$((MERGED+1)); continue
+            fi
+
+            # The squash subject IS the release-notes line the in-app updater
+            # shows users (Rule 19), so it has to be the PR title and not
+            # GitHub's default "Merge pull request #n from …".
+            ARGS=(-X PUT "repos/$PRIVATE_REPO/pulls/$NUM/merge"
+                  -f merge_method=squash
+                  -f "commit_title=$TITLE (#$NUM)"
+                  -f "sha=$SHA")
+
+            # Rule 18 enforcement at the one chokepoint where commit bodies
+            # enter main. The repo's squash setting is COMMIT_MESSAGES, so the
+            # body is the branch's commit messages concatenated — and a
+            # Co-Authored-By trailer naming an AI in any of them would land on
+            # main and put that AI in GitHub's Contributors graph, which is the
+            # public-facing thing Rule 18 exists to prevent.
+            #
+            # When nothing matches, commit_message is left OFF entirely so
+            # GitHub composes the body exactly as it always has. The override
+            # engages only when it must, so the normal path cannot drift from
+            # the default formatting.
+            # Here-strings, not pipes into grep — same pipefail/SIGPIPE trap as
+            # the migrations guard above.
+            AI_TRAILER='^co-authored-by:.*(claude|anthropic|copilot|openai|noreply@anthropic)'
+            BODY=$(gh api --paginate "repos/$PRIVATE_REPO/pulls/$NUM/commits" \
+                     --jq '.[].commit.message' | sed 's/\r$//')
+            if grep -qiE "$AI_TRAILER" <<< "$BODY"; then
+              echo "::warning::PR #$NUM carries an AI co-author trailer; stripping it from the squash body (Rule 18)."
+              CLEAN_BODY=$(grep -viE "$AI_TRAILER" <<< "$BODY" || true)
+              ARGS+=(-f "commit_message=$CLEAN_BODY")
+            fi
+
+            if gh api "${ARGS[@]}" >/dev/null; then
+              echo "✅ Merged PR #$NUM"
+              MERGED=$((MERGED+1))
+              # delete_branch_on_merge is false on kfit-app, so the branch
+              # outlives the merge (Rule 7 wants it gone). Never touched for a
+              # fork — that branch is not ours to delete.
+              if [ "$FORK" != "true" ]; then
+                gh api -X DELETE "repos/$PRIVATE_REPO/git/refs/heads/$HEAD_REF" \
+                  >/dev/null 2>&1 || true
+              fi
+            else
+              # Refused. Almost always branch protection doing its job against a
+              # PR that is not actually ready (405), in which case the next
+              # sweep retries and nothing needs doing.
+              #
+              # The other possibility is a token that cannot write, which looks
+              # different (403) and never clears by retrying — so the scope hint
+              # is repeated here rather than left in a preflight warning nobody
+              # scrolls back to.
+              echo "::notice::PR #$NUM was not merged (state $STATE)."
+              echo "If that was a 405 the PR is simply not ready yet and the next sweep retries."
+              echo "If it was a 403, RELEASE_PAT is missing Contents: write / Pull requests: write on $PRIVATE_REPO."
+              SKIPPED=$((SKIPPED+1))
+            fi
+          done
+
+          echo "Merged $MERGED, updated $UPDATED, skipped $SKIPPED."
