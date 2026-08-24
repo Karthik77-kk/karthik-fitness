@@ -1,0 +1,253 @@
+name: Private PR Quality Gate (kfit-web)
+
+# Same arrangement as private-pr-gate.yml, for a second private repo.
+#
+# A SEPARATE file rather than folding kfit-web into the existing one on purpose:
+# kfit-app's gate is Flutter + Supabase (flutter analyze, flutter test, a local
+# Supabase stack for pgTAP) and kfit-web's is Node (build, typecheck, test,
+# lint) — different toolchains, different failure modes, and the existing file
+# is already hardened against real incidents (see its own comments). Branching
+# one file on repo identity for two unrelated toolchains would risk a change
+# meant for one silently touching the other. Two files, one pattern.
+#
+# Read private-pr-gate.yml's header first — the reasoning for POLLING instead
+# of being triggered, and for running on the public repo at all, is identical
+# here and not repeated.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to gate (blank = every open PR that needs it)"
+        required: false
+  repository_dispatch:
+    types: [private-pr-quality-web]
+
+concurrency:
+  group: private-pr-gate-web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REPO: Karthik77-kk/kfit-web
+  # Must match the required status check on kfit-web/main EXACTLY — branch
+  # protection matches by context string, and a typo here produces a green
+  # status nobody is waiting for while the real one blocks the PR forever.
+  CONTEXT: Verify (build + test)
+
+jobs:
+  discover:
+    name: Find PRs needing a gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      any: ${{ steps.find.outputs.any }}
+    steps:
+      - name: Ask the private repo what needs running
+        id: find
+        env:
+          # Fine-grained PAT scoped to kfit-web ONLY:
+          #   Contents: read           (check out the source)
+          #   Pull requests: read      (list open PRs)
+          #   Commit statuses: write   (report the result back)
+          GH_TOKEN: ${{ secrets.KFIT_WEB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::KFIT_WEB_TOKEN is not set. Create a fine-grained PAT"
+            echo "scoped to ${PRIVATE_REPO} with Contents:read, Pull requests:read,"
+            echo "Commit statuses:write and add it as a secret on this repo."
+            exit 1
+          fi
+
+          ONLY="${{ github.event.inputs.pr || github.event.client_payload.pr || '' }}"
+
+          PRS=$(gh pr list --repo "$PRIVATE_REPO" --state open --base main \
+                  --json number,headRefOid,baseRefOid,title,isDraft --limit 50)
+
+          SELECTED='[]'
+          for row in $(echo "$PRS" | jq -r '.[] | @base64'); do
+            pr() { echo "$row" | base64 -d | jq -r "$1"; }
+            NUM=$(pr .number); SHA=$(pr .headRefOid); BASE=$(pr .baseRefOid)
+            [ "$(pr .isDraft)" = "true" ] && continue
+            if [ -n "$ONLY" ] && [ "$NUM" != "$ONLY" ]; then continue; fi
+
+            # Skip head commits that already carry a verdict — see
+            # private-pr-gate.yml for why. An explicit workflow_dispatch for
+            # one PR overrides this.
+            if [ -z "$ONLY" ]; then
+              STATE=$(gh api "repos/$PRIVATE_REPO/commits/$SHA/status" \
+                        --jq --arg c "$CONTEXT" \
+                        '[.statuses[] | select(.context == $c)] | first | .state // "none"' \
+                        2>/dev/null || echo none)
+              case "$STATE" in success|failure|error|pending) continue ;; esac
+            fi
+
+            SELECTED=$(echo "$SELECTED" | jq -c \
+              --argjson n "$NUM" --arg s "$SHA" --arg b "$BASE" \
+              '. + [{pr:$n, sha:$s, base:$b}]')
+          done
+
+          COUNT=$(echo "$SELECTED" | jq 'length')
+          echo "Selected $COUNT PR(s): $SELECTED"
+          echo "matrix=$(echo "$SELECTED" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
+          echo "any=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify PR
+    needs: discover
+    if: needs.discover.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Mark the PR as running
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_WEB_TOKEN }}
+        run: |
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state=pending \
+            -f context="$CONTEXT" \
+            -f description="Running on the public runner" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: Karthik77-kk/kfit-web
+          ref: ${{ matrix.sha }}
+          token: ${{ secrets.KFIT_WEB_TOKEN }}
+          fetch-depth: 0
+          # The token must not survive into the workspace git config: any step
+          # after this runs code from the PR, and this token can read the
+          # whole private repo.
+          persist-credentials: false
+
+      - name: Detect changed paths
+        id: changed
+        run: |
+          FILES=$(git diff --name-only "${{ matrix.base }}" "${{ matrix.sha }}")
+          # Deliberately NOT echoed — see private-pr-gate.yml for why.
+          #
+          # A change touching only docs, the vendored skills, or design
+          # references produces a byte-identical build. Skipping the toolchain
+          # for those is the same reasoning as Rule 20 in kfit-app: a green
+          # gate that ran nothing meaningful is still green, and running
+          # `npm ci` + a full build for a markdown-only PR wastes the exact
+          # free minutes this whole arrangement exists to spend carefully.
+          if echo "$FILES" | grep -qvE '^(docs/|\.claude/|README\.md$|CLAUDE\.md$)'; then
+            echo "code=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Changed files: $(echo "$FILES" | wc -l)"
+
+      - name: Secret scan (no hardcoded credentials in src/ or workflows)
+        run: |
+          # Same patterns as kfit-app's gate: HF tokens, GitHub PATs, AWS keys,
+          # Google/Gemini API keys, private key blocks.
+          #
+          # .env is deliberately OUT of scope: it holds the Supabase URL and
+          # publishable key, committed on purpose (docs/DECISIONS.md explains
+          # why — both are public by design and ship in the bundle regardless).
+          # Scanning it would fail every PR on a file that is supposed to look
+          # like this.
+          PATTERN='hf_[A-Za-z0-9]{30}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|sb_secret_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+          if grep -rEn "$PATTERN" src/ .github/ 2>/dev/null | grep -v 'gate-allow-token'; then
+            echo "::error::Hardcoded credential detected. Move it to a GitHub Actions secret, or tag the line // gate-allow-token if it is an intentional bundled token."
+            exit 1
+          fi
+          echo "✅ No unexpected hardcoded credentials in src/ or .github/"
+
+      - name: Secret-key guard (no service_role / secret key committed)
+        run: |
+          # A Supabase secret/service_role key in the browser bypasses RLS
+          # entirely — this is the one credential class this project treats as
+          # more severe than an ordinary leaked token, and env.ts already
+          # refuses to boot against one at runtime (see src/lib/env.ts). This
+          # is the same check applied to what actually gets committed.
+          if grep -rEn 'sb_secret_[A-Za-z0-9]{20,}' . \
+               --include='*.ts' --include='*.tsx' --include='*.env*' \
+               --exclude-dir=node_modules --exclude-dir=.git 2>/dev/null; then
+            echo "::error::A Supabase secret/service_role key is committed. It bypasses RLS for every user. Rotate it in the Supabase dashboard and remove it from history."
+            exit 1
+          fi
+          echo "✅ No Supabase secret key committed"
+
+      - name: Author identity guard (no AI attribution)
+        run: |
+          # Same rule as kfit-app (that repo's Rule 18), stated in this repo's
+          # own terms as kfit-web/CLAUDE.md's non-negotiable #5. Scoped to the
+          # PR's own commits, never the whole history.
+          RANGE="${{ matrix.base }}..${{ matrix.sha }}"
+
+          if git log --format='%B' "$RANGE" \
+               | grep -inE '^[[:space:]]*co-authored-by:.*(claude|anthropic|copilot|openai|gpt-|gemini)'; then
+            echo "::error::A commit in this PR credits an AI as co-author. GitHub counts that as a real repository contributor. Remove the trailer (git rebase -i, or git commit --amend) and force-push."
+            exit 1
+          fi
+
+          if git log --format='%an <%ae>%n%cn <%ce>' "$RANGE" \
+               | grep -inE '(claude|anthropic|copilot|openai)'; then
+            echo "::error::A commit in this PR is authored or committed by an AI identity. Re-author it as Karthik and force-push."
+            exit 1
+          fi
+          echo "✅ No AI attribution in this PR's commits"
+
+      - name: Set up Node
+        if: steps.changed.outputs.code == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.changed.outputs.code == 'true'
+        run: npm ci
+
+      - name: Typecheck
+        if: steps.changed.outputs.code == 'true'
+        run: npm run typecheck
+
+      - name: Lint
+        if: steps.changed.outputs.code == 'true'
+        run: npm run lint
+
+      - name: Test
+        if: steps.changed.outputs.code == 'true'
+        run: npm test
+
+      - name: Build
+        if: steps.changed.outputs.code == 'true'
+        run: npm run build
+
+      - name: Docs/skills-only PR
+        if: steps.changed.outputs.code == 'false'
+        run: echo "Only docs/.claude/ changed — toolchain skipped; guards still ran."
+
+      # always(), so a failed or cancelled run still reports. Without this a
+      # crash leaves the PR stuck on "pending" forever with nothing coming.
+      - name: Report the verdict back to the private PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.KFIT_WEB_TOKEN }}
+          RESULT: ${{ job.status }}
+        run: |
+          case "$RESULT" in
+            success) STATE=success; DESC="Passed on the public runner" ;;
+            cancelled) STATE=error;  DESC="Cancelled" ;;
+            *) STATE=failure; DESC="Failed — see the run log" ;;
+          esac
+          gh api -X POST "repos/$PRIVATE_REPO/statuses/${{ matrix.sha }}" \
+            -f state="$STATE" \
+            -f context="$CONTEXT" \
+            -f description="$DESC" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
