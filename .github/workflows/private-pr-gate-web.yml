@@ -16,7 +16,15 @@ name: Private PR Quality Gate (kfit-web)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # Offset by 2 minutes from private-pr-gate.yml's identical "*/10", which
+    # a review pass caught: both on the same tick means this repo's
+    # discover→verify chain shares the runner queue with kfit-app's much
+    # heavier verify/verify-supabase jobs (25-min timeouts, a full Flutter
+    # toolchain and a local Supabase stack) at the exact instant they start.
+    # private-auto-merge-web.yml's own 7-minute offset is sized assuming this
+    # gate has already posted a verdict — contention at :00/:10/:20 could
+    # delay that past :07 and cost a full extra sweep cycle for nothing.
+    - cron: "2-59/10 * * * *"
   workflow_dispatch:
     inputs:
       pr:
